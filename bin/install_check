@@ -1,0 +1,196 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Release check, no model call and no API key: builds the gem, installs the
+# BUILT .gem into a fresh Rails app, runs the generator and the migration,
+# then runs fake-chat turns over an in-process fake network (a Faraday
+# adapter that answers locally and opens no socket), once through
+# RubyLLM::InfiniteContext.attach and once through a real acts_as_chat
+# record. Everything happens in a temp dir that is removed at the end.
+#
+#   ruby bin/install_check
+#
+# It downloads gems from rubygems.org (Rails and friends), nothing else.
+
+require "fileutils"
+require "tmpdir"
+require "open3"
+
+$stdout.sync = true
+ROOT = File.expand_path("..", __dir__)
+KEEP = ENV["INSTALL_CHECK_KEEP"] == "1"
+
+def step(title)
+  puts "\n== #{title}"
+end
+
+# Runs a command with a deadline (a hung step is killed, not waited on).
+def run!(env, *cmd, chdir: nil, timeout: 900)
+  puts "$ #{cmd.join(" ")}"
+  opts = chdir ? {chdir: chdir} : {}
+  out = +""
+  status = nil
+  Open3.popen2e(env, *cmd, **opts) do |stdin, io, wait|
+    stdin.close
+    reader = Thread.new { io.each_line { |l| out << l } }
+    if wait.join(timeout).nil?
+      Process.kill("KILL", wait.pid)
+      reader.join(5)
+      puts out.lines.last(60).map { |l| l[0, 300] }.join
+      abort "TIMED OUT after #{timeout}s: #{cmd.join(" ")}"
+    end
+    reader.join
+    status = wait.value
+  end
+  shown = status.success? ? out.lines.last(40) : out.lines.first(25) + ["  [...]\n"] + out.lines.last(15)
+  puts shown.map { |l| l[0, 300] }.join
+  abort "FAILED (#{status.exitstatus}): #{cmd.join(" ")}" unless status.success?
+  out
+end
+
+RUNNER = <<~'RUBY'
+  # Runs inside the app (bin/rails runner). A fake network: no socket, no key.
+  require "faraday"
+  require "json"
+
+  # Fail fast: if the turns hang, print every thread's backtrace and exit.
+  $stdout.sync = true
+  $stderr.sync = true
+  Thread.new do
+    sleep 90
+    warn "WATCHDOG: still running after 90s; thread backtraces follow (frames from this gem and the runner only)"
+    Thread.list.each do |t|
+      warn "--- #{t.inspect[0, 120]}"
+      frames = (t.backtrace || []).select { |l| l.include?("infinite_context") || l.include?("install_check_runner") || l.include?("ruby_llm-") }
+      warn frames.first(30).map { |l| l.sub(%r{.*/gems/}, "") }.join("\n")
+    end
+    warn "--- last log lines"
+    log = File.join(Rails.root, "log", "development.log")
+    warn File.readlines(log).last(25).map { |l| l[0, 250] }.join if File.exist?(log)
+    exit!(3)
+  end
+
+  $calls = []
+  class InstallCheckAdapter < Faraday::Adapter
+    def call(env)
+      super
+      $calls << [env.method.to_s.upcase, env.url.to_s]
+      text = "a short summary line"
+      body = {"id" => "msg_fake", "type" => "message", "role" => "assistant", "model" => "claude-haiku-4-5",
+              "content" => [{"type" => "text", "text" => text}], "stop_reason" => "end_turn", "stop_sequence" => nil,
+              "usage" => {"input_tokens" => 50, "output_tokens" => 8}}
+      save_response(env, 200, JSON.generate(body), {"content-type" => "application/json"})
+      @app.call(env)
+    end
+  end
+  Faraday::Adapter.register_middleware(install_check: InstallCheckAdapter)
+  RubyLLM.configure do |c|
+    c.faraday_adapter = :install_check
+    c.anthropic_api_key = "placeholder-not-a-key"
+    c.anthropic_api_base = "http://127.0.0.1:9"
+    c.max_retries = 0
+  end
+
+  def check(label, ok)
+    puts "#{ok ? "ok  " : "FAIL"} #{label}"
+    $failed = true unless ok
+  end
+
+  long = "A long message about the Oakvale greenhouse sensors. " * 20 # over 512 bytes: needs a compactor call
+
+  puts "gem: #{Gem.loaded_specs["ruby_llm-infinite_context"]&.full_gem_path}"
+  check "built gem is the one loaded", Gem.loaded_specs["ruby_llm-infinite_context"]&.version.to_s == "0.1.0"
+  check "tables exist", %w[ric_trees ric_entries ric_nodes ric_views ric_zoom_events].all? { |t| ActiveRecord::Base.connection.table_exists?(t) }
+
+  # 1. attach with a chat name
+  memory = RubyLLM::InfiniteContext.attach("claude-haiku-4-5", key: "install-check", compactor: "claude-haiku-4-5", tokens: 20_000)
+  reply = memory.turn(long)
+  check "attach: the turn got a reply", reply.content == "a short summary line"
+  check "attach: user message and reply are logged", memory.tree.entry_count == 2
+  check "attach: the compactor ran over the fake network", $calls.size >= 2
+  check "attach: every request went to /v1/messages", $calls.all? { |m, u| m == "POST" && URI(u).path == "/v1/messages" }
+  lines = memory.tree.view_lines(memory.budget)
+  check "attach: the saved view has lines", lines.size >= 1
+  puts "view: #{lines.first(2).inspect}"
+
+  # 2. a real acts_as_chat record
+  $calls.clear
+  chat = Chat.create!(model: "claude-haiku-4-5")
+  check "record: acts_as_chat has model_id", chat.model_id == "claude-haiku-4-5"
+  check "record: no #chat method (the old assumption)", !chat.respond_to?(:chat)
+  mem2 = chat.with_infinite_context(tokens: 5_000)
+  r2 = mem2.turn(long)
+  check "record: the turn got a reply", r2.content == "a short summary line"
+  check "record: tree key is Chat:<id>", mem2.tree.key == "Chat:#{chat.id}"
+  check "record: the record's own message table stayed empty", ActiveRecord::Base.connection.select_value("SELECT COUNT(*) FROM messages").to_i == 0
+  r3 = mem2.turn("and one more")
+  check "record: a second turn works with a fresh chat", r3.content == "a short summary line"
+  check "record: every request went to /v1/messages", $calls.all? { |m, u| URI(u).path == "/v1/messages" }
+
+  puts($failed ? "\nRESULT: FAILED" : "\nRESULT: ALL OK")
+  exit($failed ? 1 : 0)
+RUBY
+
+work = Dir.mktmpdir("install-check")
+begin
+  step "build the gem"
+  gem_path = nil
+  Dir.chdir(ROOT) do
+    out = run!({}, "gem", "build", "ruby_llm-infinite_context.gemspec", "--output", File.join(work, "built.gem"))
+    gem_path = File.join(work, "built.gem")
+    abort "no gem built" unless File.file?(gem_path) && out.include?("Successfully built")
+  end
+
+  step "install Rails into a temp GEM_HOME"
+  gems = File.join(work, "gems")
+  env = {"GEM_HOME" => gems, "GEM_PATH" => gems, "BUNDLE_GEMFILE" => nil, "RUBYOPT" => nil}
+  run!(env, "gem", "install", "rails", "-v", "~> 8.0", "--no-document", "--conservative")
+
+  step "rails new (minimal, sqlite3)"
+  run!(env, File.join(gems, "bin", "rails"), "new", "app", "--minimal", "--skip-git", "--skip-bundle", "--skip-test",
+    "--database=sqlite3", chdir: work)
+  app = File.join(work, "app")
+  gemfile = File.join(app, "Gemfile")
+  File.write(gemfile, File.read(gemfile) + "\ngem \"ruby_llm\", \"~> 2.0\"\n")
+  benv = {"GEM_HOME" => nil, "GEM_PATH" => nil, "BUNDLE_GEMFILE" => nil, "RUBYOPT" => nil}
+  run!(benv, "bundle", "config", "set", "--local", "path", "vendor/bundle", chdir: app)
+  run!(benv, "bundle", "install", chdir: app)
+
+  step "install the BUILT .gem into the app's bundle, then add it to the Gemfile"
+  install_dir = Dir[File.join(app, "vendor", "bundle", "ruby", "*")].first
+  abort "no bundle dir" unless install_dir
+  run!(benv, "gem", "install", gem_path, "--install-dir", install_dir, "--ignore-dependencies", "--no-document")
+  File.write(gemfile, File.read(gemfile) + "gem \"ruby_llm-infinite_context\", \"0.1.0\"\n")
+  run!(benv, "bundle", "install", "--local", chdir: app)
+
+  step "ruby_llm install (acts_as_chat models), then the infinite_context generator"
+  run!(benv, "bundle", "exec", "rails", "generate", "ruby_llm:install", chdir: app)
+  out = run!(benv, "bundle", "exec", "rails", "generate", "ruby_llm:infinite_context:install", chdir: app)
+  abort "generator printed no migration" unless out =~ /create\s+db\/migrate\/\d+_create_ric/ || out.include?("migrate")
+  migrations = Dir[File.join(app, "db", "migrate", "*")].map { |f| File.basename(f) }
+  puts "migrations: #{migrations.inspect}"
+  abort "no ric migration" unless migrations.any? { |m| m.include?("ric") || m.include?("infinite") }
+
+  step "migrate"
+  run!(benv, "bundle", "exec", "rails", "db:migrate", chdir: app)
+  run!(benv, "bundle", "exec", "rails", "ruby_llm:load_models", chdir: app)
+
+  step "wire the Chat record and run fake-chat turns"
+  chat_model = File.join(app, "app", "models", "chat.rb")
+  source = File.read(chat_model)
+  source = source.sub(/^(\s*)acts_as_chat.*$/) do
+    "#{$&}\n#{$1}include RubyLLM::InfiniteContext::Model\n#{$1}has_infinite_context compactor: \"claude-haiku-4-5\""
+  end
+  abort "could not wire Chat (no acts_as_chat line found)" unless source.include?("has_infinite_context")
+  File.write(chat_model, source)
+  File.write(File.join(app, "install_check_runner.rb"), RUNNER)
+  run!(benv.merge("RAILS_ENV" => "development"), "bundle", "exec", "rails", "runner", "install_check_runner.rb", chdir: app, timeout: 180)
+
+  puts "\nINSTALL CHECK PASSED"
+ensure
+  if KEEP
+    puts "kept: #{work}"
+  else
+    FileUtils.rm_rf(work)
+  end
+end

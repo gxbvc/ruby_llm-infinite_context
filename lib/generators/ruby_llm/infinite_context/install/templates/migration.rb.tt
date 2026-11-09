@@ -1,0 +1,7 @@
+# frozen_string_literal: true
+
+class CreateRubyLlmInfiniteContextTables < ActiveRecord::Migration[<%= ActiveRecord::Migration.current_version %>]
+  def change
+    RubyLLM::InfiniteContext::Schema.migration(self)
+  end
+end

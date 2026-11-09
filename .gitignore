@@ -1,0 +1,16 @@
+/.bundle/
+/.yardoc
+/_yardoc/
+/coverage/
+/doc/
+/pkg/
+/spec/reports/
+/tmp/
+Gemfile.lock
+test/tmp/
+*.sqlite3
+*.sqlite3-*
+*.lock
+*.gem
+bench/corpus*/
+bench/results*/
