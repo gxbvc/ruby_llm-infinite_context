@@ -15,7 +15,7 @@ module RubyLLM
     #
     # A tool result (`echo`) is summarized as a pair with the tool call that
     # produced it: the call's text rides along as context. The pair idea is
-    # a bench question (KICKOFF decision 3): the alternative, summarizing
+    # an open question for the benchmark: the alternative, summarizing
     # call and result as one node, is not shipped.
     class Compactor
       include TreeMath
