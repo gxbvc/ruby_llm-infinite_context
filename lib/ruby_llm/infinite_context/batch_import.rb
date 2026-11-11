@@ -31,7 +31,12 @@ module RubyLLM
       # Appends `messages` (role/content pairs) to the log and submits the
       # ready nodes as one batch. Returns nil when nothing needs a model
       # call. When RubyLLM::Batch is unavailable, use Pump::Runner instead.
+      #
+      # With InfiniteContext.required_protocol set, raises ProtocolError
+      # before it logs or sends anything: a provider batch job is not a chat
+      # completions call.
       def submit(messages)
+        refuse_batch_under_required_protocol!
         import_messages(messages)
         chats = []
         nodes = []
@@ -56,6 +61,7 @@ module RubyLLM
       # FIRST: a missing, empty or short result fails the whole collect and
       # stores nothing, so a partial batch never half-populates the tree.
       def collect!(submission, batch)
+        refuse_batch_under_required_protocol!
         raise Error, "batch is not complete (#{batch.status})" unless batch.complete?
 
         messages = batch.messages
@@ -79,6 +85,15 @@ module RubyLLM
       end
 
       private
+
+      def refuse_batch_under_required_protocol!
+        required = InfiniteContext.required_protocol
+        return if required.nil?
+
+        raise ProtocolError, "BatchImport uses provider batch jobs (RubyLLM::Batch), which are not " \
+          "#{required.inspect} calls, and RubyLLM::InfiniteContext.required_protocol is #{required.inspect}. " \
+          "Load the thread with tree.append for each message, then Pump::Runner.new(tree).run."
+      end
 
       def import_messages(messages)
         messages.each do |m|

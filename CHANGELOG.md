@@ -14,11 +14,14 @@ All notable changes to this gem. The format follows
   gem never searches these columns in SQL, so every feature works with it on. The README shows
   the setup, the rules, and how to declare it yourself with `to_prepare`.
 - `RubyLLM::InfiniteContext.required_protocol = :chat_completions`: every chat the gem builds
-  or uses (the compactor, the pump and `PumpJob`, `BatchImport`, each turn of `attach` and the
+  or uses (the compactor, the pump and `PumpJob`, each turn of `attach` and the
   `Model` concern, and chats passed in by the caller) must use that protocol. Any other
   protocol, none, a chat whose protocol cannot be read, or a fallback to another provider
-  raises `RubyLLM::InfiniteContext::ProtocolError` before a request is sent.
-- `rake test:encrypted` runs the whole suite again with encryption on; `rake` runs both.
+  raises `RubyLLM::InfiniteContext::ProtocolError` before a request is sent. `BatchImport`
+  (`submit` and `collect!`) always raises `ProtocolError` under this rule, before it logs or
+  submits anything: provider batch jobs are not chat completions calls. Load old threads with
+  `tree.append` and `Pump::Runner` instead.
+- `rake test:encrypted` runs the library tests again with encryption on; `rake` runs both.
 
 ### Changed
 

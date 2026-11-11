@@ -150,6 +150,10 @@ Compresses an existing long thread at batch prices with `RubyLLM::Batch` (`ask_l
 Call `submit` again after `collect!` when the thread is longer than one batch covers:
 later levels become ready as their children finish.
 
+A provider batch job is not a chat completions call. When `required_protocol` is set (see
+below), `submit` and `collect!` raise `ProtocolError`; load the thread with `tree.append` and
+`Pump::Runner` instead.
+
 ### Encrypting the stored text
 
 The text columns (`ric_entries.text`, the original messages, and `ric_nodes.text`, the summary
@@ -204,10 +208,12 @@ RubyLLM::InfiniteContext.required_protocol = :chat_completions
 ```
 
 Then every chat the gem builds or uses must have that protocol: the compactor (the pump and
-`PumpJob`), `BatchImport`, and each turn of `attach` and the `Model` concern, including chats
-that you build and pass in (for an `acts_as_chat` record, the chat its `to_llm` returns). A chat with another protocol, or with none, raises
-`RubyLLM::InfiniteContext::ProtocolError` before any request is sent and before the turn is
-logged. A chat with fallback models is accepted only when each fallback is a `RubyLLM::Model`
+`PumpJob`) and each turn of `attach` and the `Model` concern, including chats that you build
+and pass in (for an `acts_as_chat` record, the chat its `to_llm` returns). A chat with another
+protocol, or with none, raises `RubyLLM::InfiniteContext::ProtocolError` before any request
+is sent and before the turn is logged. `BatchImport` always raises `ProtocolError` under
+this rule, before it logs or submits anything, because provider batch jobs are not chat
+completions calls. A chat with fallback models is accepted only when each fallback is a `RubyLLM::Model`
 on the same provider, because RubyLLM drops the protocol when a fallback changes provider.
 
 ### A locked-down setup
@@ -230,8 +236,16 @@ RubyLLM::InfiniteContext.encrypt_text = true
 ```
 
 Pass the same `wire` as `chat_options:` to `attach`, or set `protocol`, `provider` and
-`context` on the `acts_as_chat` record. Use `BatchImport.new(tree)` for old threads: it reads
-the same default options.
+`context` on the `acts_as_chat` record.
+
+Load old threads with `append` and the pump, not `BatchImport` (batch jobs are not chat
+completions, so `BatchImport` refuses under this setup):
+
+```ruby
+tree = RubyLLM::InfiniteContext::Tree.for("thread-42", compactor: "accounts/fireworks/models/glm-5p3-flash")
+old_messages.each { |m| tree.append(m.role == "assistant" ? :assistant : :user, m.content) }
+RubyLLM::InfiniteContext::Pump::Runner.new(tree).run   # plain chat completions, normal prices
+```
 
 ## How it works
 

@@ -179,27 +179,55 @@ module RubyLLM
 
       # -- batch import -------------------------------------------------------------------
 
-      def test_batch_import_without_protocol_submits_nothing
+      # A provider batch job is not a chat completions call: with the rule
+      # set, BatchImport refuses even with chat_completions options, before
+      # it logs or submits anything.
+      def test_batch_import_submit_is_refused_under_the_rule
+        InfiniteContext.compactor_chat_options = @completions
         tree = Tree.for("rp-batch", compactor: MODEL)
-        import = BatchImport.new(tree, model: MODEL, chat_options: @wired, batch_class: FakeBatch)
-        error = assert_refused { import.submit([{role: "user", content: "long " * 300}]) }
-        assert_match(/batch import/, error.message)
-        assert_nil FakeBatch.submitted
-      end
-
-      def test_batch_import_default_options_and_factories_are_checked
-        InfiniteContext.compactor_chat_options = @wired
-        tree = Tree.for("rp-batch-default", compactor: MODEL)
-        assert_refused { BatchImport.new(tree, batch_class: FakeBatch).submit([{role: "user", content: "long " * 300}]) }
-        assert_refused do
-          BatchImport.new(tree, chat_factory: -> { ProtocolChat.new(nil) }, batch_class: FakeBatch).submit([])
+        [
+          BatchImport.new(tree, model: MODEL, chat_options: @completions, batch_class: FakeBatch),
+          BatchImport.new(tree, batch_class: FakeBatch),
+          BatchImport.new(tree, chat_factory: -> { ProtocolChat.new(:chat_completions) }, batch_class: FakeBatch)
+        ].each do |import|
+          error = assert_refused { import.submit([{role: "user", content: "long " * 300}]) }
+          assert_match(/provider batch jobs/, error.message)
+          assert_match(/tree\.append/, error.message)
+          assert_match(/Pump::Runner/, error.message)
         end
         assert_nil FakeBatch.submitted
+        assert_equal 0, tree.entry_count, "nothing was logged"
+      end
 
-        InfiniteContext.compactor_chat_options = @completions
-        submission = BatchImport.new(tree, batch_class: FakeBatch).submit([])
+      def test_batch_import_collect_is_refused_under_the_rule
+        tree = Tree.for("rp-batch-collect", compactor: MODEL)
+        submission = BatchImport::Submission.new(nodes: [[0, 0]], id: "batch-1", provider: "openai")
+        batch = Object.new
+        def batch.complete? = raise("collect! must refuse before it reads the batch")
+        assert_refused { BatchImport.new(tree, batch_class: FakeBatch).collect!(submission, batch) }
+        assert_equal 0, tree.nodes.count
+      end
+
+      def test_without_the_rule_batch_import_still_submits
+        InfiniteContext.required_protocol = nil
+        tree = Tree.for("rp-batch-off", compactor: MODEL)
+        submission = BatchImport.new(tree, chat_options: @completions, batch_class: FakeBatch)
+          .submit([{role: "user", content: "long " * 300}])
         assert_equal "batch-1", submission.id
-        assert_equal [:chat_completions], FakeBatch.submitted.map { |c| c.instance_variable_get(:@protocol) }.uniq
+        assert_equal 1, FakeBatch.submitted.size
+      end
+
+      # The route the error message names: append, then the pump, all on
+      # chat completions.
+      def test_append_and_the_pump_load_an_old_thread_under_the_rule
+        InfiniteContext.compactor_chat_options = @completions
+        tree = Tree.for("rp-old-thread", compactor: MODEL)
+        [[:user, "long " * 300], [:assistant, "short reply"], [:user, "more " * 300]].each do |kind, text|
+          tree.append(kind, text)
+        end
+        assert_operator Pump::Runner.new(tree, jobs: 2).run, :>=, 3
+        refute_empty FakeNetwork.calls
+        assert_equal ["/v1/chat/completions"], paths.uniq
       end
 
       # -- attach and the Model concern ------------------------------------------------------
