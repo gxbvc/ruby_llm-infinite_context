@@ -9,7 +9,9 @@ agent gets tools to zoom into any line, down to the original message.
 
 ## Status
 
-0.1.0 is the first version and has not been released yet. It has been tested end to end on three
+0.2.0 adds Active Record Encryption for the text columns and a way to require one wire
+protocol for every chat the gem uses (see below and `CHANGELOG.md`). The gem has been tested
+end to end on three
 real models: DeepSeek V4.1 Flash (11 of 12 questions right, 33 zooms), Claude Haiku 4.5
 (10 of 12 right, 31 zooms) and GLM-5.3 Flash (10 of 12 right, 26 zooms), each as both
 compactor and reader, on a small synthetic log (14 entries, 12 questions). That is a smoke
@@ -148,6 +150,89 @@ Compresses an existing long thread at batch prices with `RubyLLM::Batch` (`ask_l
 Call `submit` again after `collect!` when the thread is longer than one batch covers:
 later levels become ready as their children finish.
 
+### Encrypting the stored text
+
+The text columns (`ric_entries.text`, the original messages, and `ric_nodes.text`, the summary
+lines) can use Active Record Encryption. Set up the keys first (`bin/rails
+db:encryption:init`, then put them in your credentials), then turn it on in an initializer:
+
+```ruby
+# config/initializers/infinite_context.rb
+RubyLLM::InfiniteContext.encrypt_text = true
+```
+
+Rules:
+
+- **Set it before the app writes a memory row.** It works if the gem's models load before or
+  after the initializer. The models are plain classes that Zeitwerk does not reload, so the
+  setting holds for the life of the process. You cannot turn it off again in the same process.
+- **Without keys, the first write raises.** Nothing is stored as plain text by mistake.
+- **The gem never searches these columns in SQL.** It reads rows by id and works on the text
+  in Ruby, so non-deterministic encryption (the Rails default) is fine. Do not add your own
+  `LIKE` or `where(text: ...)` queries on them.
+- **Other columns are not encrypted.** They hold numbers, kinds and the tree key. `ric_views`
+  holds only `[level, i]` pairs. Make the tree key an opaque id (a record id, not an email
+  address or a phone number).
+- **Column size:** ciphertext is larger than the plain text (base64 and a JSON header, after
+  compression). The generator makes `text` columns, which have no practical limit on SQLite
+  and Postgres. On MySQL, change them to `mediumtext` or larger.
+- **Rows that exist already** stay plain text and cannot be read once encryption is on. Set
+  `config.active_record.encryption.support_unencrypted_data = true`, run
+  `RubyLLM::InfiniteContext::Entry.find_each(&:encrypt)` and the same for `Node`, then turn
+  that setting off again.
+
+If you prefer to declare it yourself, do it once per process, with a guard:
+
+```ruby
+# config/application.rb
+config.to_prepare do
+  [RubyLLM::InfiniteContext::Entry, RubyLLM::InfiniteContext::Node].each do |model|
+    model.encrypts :text unless Array(model.encrypted_attributes).include?(:text)
+  end
+end
+```
+
+`to_prepare` runs again on every code reload in development, and the gem's models are not
+reloaded. Without the guard, a second `encrypts :text` would wrap the column twice.
+
+### Requiring one protocol
+
+To make sure no chat the gem uses can reach another API, require the protocol at boot:
+
+```ruby
+RubyLLM::InfiniteContext.required_protocol = :chat_completions
+```
+
+Then every chat the gem builds or uses must have that protocol: the compactor (the pump and
+`PumpJob`), `BatchImport`, and each turn of `attach` and the `Model` concern, including chats
+that you build and pass in (for an `acts_as_chat` record, the chat its `to_llm` returns). A chat with another protocol, or with none, raises
+`RubyLLM::InfiniteContext::ProtocolError` before any request is sent and before the turn is
+logged. A chat with fallback models is accepted only when each fallback is a `RubyLLM::Model`
+on the same provider, because RubyLLM drops the protocol when a fallback changes provider.
+
+### A locked-down setup
+
+For an app that must keep message text private (Fireworks serverless, chat completions only,
+encrypted storage):
+
+```ruby
+# config/initializers/infinite_context.rb
+fireworks = RubyLLM.context do |config|
+  config.openai_api_key = Rails.application.credentials.fireworks_api_key
+  config.openai_api_base = "https://api.fireworks.ai/inference/v1"
+end
+wire = { provider: :openai, protocol: :chat_completions,
+         assume_model_exists: true, context: fireworks }
+
+RubyLLM::InfiniteContext.required_protocol = :chat_completions
+RubyLLM::InfiniteContext.compactor_chat_options = wire
+RubyLLM::InfiniteContext.encrypt_text = true
+```
+
+Pass the same `wire` as `chat_options:` to `attach`, or set `protocol`, `provider` and
+`context` on the `acts_as_chat` record. Use `BatchImport.new(tree)` for old threads: it reads
+the same default options.
+
 ## How it works
 
 - **Log** (`ric_entries`): append-only, never updated or deleted.
@@ -189,7 +274,9 @@ machinery with no API calls. No client data is used anywhere in the corpus. See
 
 ```
 bin/setup
+rake            # the tests, the tests again with encryption on, then standard
 rake test
+rake test:encrypted
 rake standard
 ```
 

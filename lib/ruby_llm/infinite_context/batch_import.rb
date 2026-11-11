@@ -148,9 +148,9 @@ module RubyLLM
         chat = if @chat_factory
           @chat_factory.call
         else
-          ChatOptions.build(@model, @chat_options || InfiniteContext.compactor_chat_options)
+          ChatOptions.build(@model, @chat_options || InfiniteContext.compactor_chat_options, role: "batch import")
         end
-        chat.with_instructions(Prompts::COMPACT_SYSTEM)
+        ChatOptions.check!(chat, "batch import").with_instructions(Prompts::COMPACT_SYSTEM)
       end
 
       def provider_name(batch)

@@ -18,6 +18,9 @@ module RubyLLM
   module InfiniteContext
     class Error < StandardError; end
 
+    # A chat does not use RubyLLM::InfiniteContext.required_protocol.
+    class ProtocolError < Error; end
+
     NODE = 512              # target size of one summary line
     DEFAULT_VIEW_BUDGET = 128_000 # default consumer view budget, bytes
     COMPACT_VIEW_BUDGET = 24_000  # the compactor's own view, 16-32 KB
@@ -38,6 +41,7 @@ require_relative "infinite_context/tokens"
 require_relative "infinite_context/fold"
 require_relative "infinite_context/prompts"
 require_relative "infinite_context/chat_options"
+require_relative "infinite_context/encryption"
 require_relative "infinite_context/compactor"
 require_relative "infinite_context/pump"
 require_relative "infinite_context/cache_mark"

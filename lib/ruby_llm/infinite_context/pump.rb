@@ -5,7 +5,8 @@ module RubyLLM
     # The compactor's scheduler. Builds every node that is not built, has its
     # sources, and has its whole context summarized (every view line before
     # the node's end is built). Up to JOBS at once; a failed node is retried
-    # up to `retries` times.
+    # up to `retries` times. A ProtocolError (see required_protocol) is a
+    # setup error: the run stops and raises it.
     module Pump
       # The nodes to start now, in order: levels from 0 up, and in each
       # level from the left. `built` and `busy` are sets of [level, i].
@@ -116,26 +117,34 @@ module RubyLLM
           threads = nodes.map do |node|
             Thread.new do
               ok = false
+              fatal = nil
               # In a Rails app each worker thread runs inside the executor (it
               # returns the thread's database connection when it ends).
               Pump.wrap_thread do
                 text, tries = @builder.build(*node)
                 @tree.store_node!(*node, text, tries:)
                 ok = true
+              rescue ProtocolError => e
+                # A setup error, not a flaky call: no retry, raised below.
+                fatal = e
               rescue => e
                 log("node #{TreeMath.label(*node)} failed: #{e.class}: #{e.message}")
               end
-              done << [node, ok]
+              done << [node, ok, fatal]
             end
           end
           # While this thread waits, the workers may autoload constants. With
           # reloading on (Rails development) that needs the load interlock, so
           # the wait must permit concurrent loads or the pass deadlocks.
-          Pump.waiting do
-            results = nodes.map { done.pop }
+          results = Pump.waiting do
+            out = nodes.map { done.pop }
             threads.each(&:join)
-            results
+            out
           end
+          fatal = results.map(&:last).compact.first
+          raise fatal if fatal
+
+          results.map { |node, ok, _| [node, ok] }
         end
 
         def log(message)

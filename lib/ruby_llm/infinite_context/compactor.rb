@@ -55,7 +55,7 @@ module RubyLLM
         @model = model
         @chat_options = chat_options && ChatOptions.normalize(chat_options)
         @chat_factory = chat_factory ||
-          -> { ChatOptions.build(@model, @chat_options || InfiniteContext.compactor_chat_options) }
+          -> { ChatOptions.build(@model, @chat_options || InfiniteContext.compactor_chat_options, role: "compactor") }
       end
 
       # Returns [text, tries].
@@ -89,7 +89,7 @@ module RubyLLM
       end
 
       def ask(context, step)
-        chat = @chat_factory.call
+        chat = ChatOptions.check!(@chat_factory.call, "compactor")
         chat = chat.with_instructions(Prompts::COMPACT_SYSTEM) if chat.respond_to?(:with_instructions)
         # The view lines so far are staged WITHOUT a request (ask_later): they
         # ride along with the step in the one request that `ask` makes. A

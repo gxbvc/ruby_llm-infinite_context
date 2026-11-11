@@ -179,5 +179,8 @@ module RubyLLM
 
       belongs_to :tree, class_name: "RubyLLM::InfiniteContext::Tree"
     end
+
+    # encrypt_text may have been set before this file loaded.
+    Encryption.apply!
   end
 end

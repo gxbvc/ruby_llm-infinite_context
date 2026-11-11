@@ -6,7 +6,11 @@
 # then runs fake-chat turns over an in-process fake network (a Faraday
 # adapter that answers locally and opens no socket), once through
 # RubyLLM::InfiniteContext.attach and once through a real acts_as_chat
-# record. Everything happens in a temp dir that is removed at the end.
+# record. The runner then runs a second time with Active Record Encryption
+# on the gem's text columns (test-only keys in config/application.rb and
+# RubyLLM::InfiniteContext.encrypt_text = true in an initializer) and checks
+# that the raw columns hold ciphertext. Everything happens in a temp dir that
+# is removed at the end.
 #
 #   ruby bin/install_check
 #
@@ -19,6 +23,8 @@ require "open3"
 $stdout.sync = true
 ROOT = File.expand_path("..", __dir__)
 KEEP = ENV["INSTALL_CHECK_KEEP"] == "1"
+require File.join(ROOT, "lib/ruby_llm/infinite_context/version")
+VERSION = RubyLLM::InfiniteContext::VERSION
 
 def step(title)
   puts "\n== #{title}"
@@ -97,13 +103,17 @@ RUNNER = <<~'RUBY'
   end
 
   long = "A long message about the Oakvale greenhouse sensors. " * 20 # over 512 bytes: needs a compactor call
+  encrypted = ENV["IC_ENCRYPT"] == "1"
+  suffix = encrypted ? "-encrypted" : ""
+  puts "mode: #{encrypted ? "encryption ON" : "encryption off"}"
 
   puts "gem: #{Gem.loaded_specs["ruby_llm-infinite_context"]&.full_gem_path}"
-  check "built gem is the one loaded", Gem.loaded_specs["ruby_llm-infinite_context"]&.version.to_s == "0.1.0"
+  check "built gem is the one loaded", Gem.loaded_specs["ruby_llm-infinite_context"]&.version.to_s == ENV.fetch("IC_VERSION")
+  check "encrypt_text matches the mode", RubyLLM::InfiniteContext.encrypt_text? == encrypted
   check "tables exist", %w[ric_trees ric_entries ric_nodes ric_views ric_zoom_events].all? { |t| ActiveRecord::Base.connection.table_exists?(t) }
 
   # 1. attach with a chat name
-  memory = RubyLLM::InfiniteContext.attach("claude-haiku-4-5", key: "install-check", compactor: "claude-haiku-4-5", tokens: 20_000)
+  memory = RubyLLM::InfiniteContext.attach("claude-haiku-4-5", key: "install-check#{suffix}", compactor: "claude-haiku-4-5", tokens: 20_000)
   reply = memory.turn(long)
   check "attach: the turn got a reply", reply.content == "a short summary line"
   check "attach: user message and reply are logged", memory.tree.entry_count == 2
@@ -126,6 +136,23 @@ RUNNER = <<~'RUBY'
   r3 = mem2.turn("and one more")
   check "record: a second turn works with a fresh chat", r3.content == "a short summary line"
   check "record: every request went to /v1/messages", $calls.all? { |m, u| URI(u).path == "/v1/messages" }
+
+  # 3. the raw columns: ciphertext with encryption on, the plain text without
+  conn = ActiveRecord::Base.connection
+  tree = memory.tree
+  entry = tree.entry(0)
+  node = tree.nodes.order(:id).first
+  raw_entry = conn.select_value("SELECT text FROM ric_entries WHERE id = #{entry.id.to_i}")
+  raw_node = conn.select_value("SELECT text FROM ric_nodes WHERE id = #{node.id.to_i}")
+  check "raw: the model reads the plain text", entry.text == long
+  if encrypted
+    check "raw: the entry column holds ciphertext", raw_entry != long && !raw_entry.include?("Oakvale") && JSON.parse(raw_entry).key?("p")
+    check "raw: the node column holds ciphertext", raw_node != node.text && JSON.parse(raw_node).key?("p")
+  else
+    check "raw: the entry column holds the plain text", raw_entry == long
+    check "raw: the node column holds the plain text", raw_node == node.text
+  end
+  check "zoom: the leaf shows the original text", RubyLLM::InfiniteContext::Zoom.new(tree, RubyLLM::InfiniteContext::Turn.new).zoom(0, 1) == long
 
   puts($failed ? "\nRESULT: FAILED" : "\nRESULT: ALL OK")
   exit($failed ? 1 : 0)
@@ -160,7 +187,7 @@ begin
   install_dir = Dir[File.join(app, "vendor", "bundle", "ruby", "*")].first
   abort "no bundle dir" unless install_dir
   run!(benv, "gem", "install", gem_path, "--install-dir", install_dir, "--ignore-dependencies", "--no-document")
-  File.write(gemfile, File.read(gemfile) + "gem \"ruby_llm-infinite_context\", \"0.1.0\"\n")
+  File.write(gemfile, File.read(gemfile) + "gem \"ruby_llm-infinite_context\", \"#{VERSION}\"\n")
   run!(benv, "bundle", "install", "--local", chdir: app)
 
   step "ruby_llm install (acts_as_chat models), then the infinite_context generator"
@@ -184,7 +211,25 @@ begin
   abort "could not wire Chat (no acts_as_chat line found)" unless source.include?("has_infinite_context")
   File.write(chat_model, source)
   File.write(File.join(app, "install_check_runner.rb"), RUNNER)
-  run!(benv.merge("RAILS_ENV" => "development"), "bundle", "exec", "rails", "runner", "install_check_runner.rb", chdir: app, timeout: 180)
+  renv = benv.merge("RAILS_ENV" => "development", "IC_VERSION" => VERSION)
+  run!(renv, "bundle", "exec", "rails", "runner", "install_check_runner.rb", chdir: app, timeout: 180)
+
+  step "turn on Active Record Encryption for the gem's text columns, run the turns again"
+  application_rb = File.join(app, "config", "application.rb")
+  source = File.read(application_rb)
+  keys = <<~KEYS
+    \\0
+        # install check only: fixed fake keys, never used anywhere else
+        config.active_record.encryption.primary_key = "install-check-only-primary-key"
+        config.active_record.encryption.deterministic_key = "install-check-only-deterministic-key"
+        config.active_record.encryption.key_derivation_salt = "install-check-only-key-derivation-salt"
+  KEYS
+  source = source.sub(/^\s*class Application < Rails::Application\n/, keys)
+  abort "could not add the encryption keys" unless source.include?("install-check-only-primary-key")
+  File.write(application_rb, source)
+  File.write(File.join(app, "config", "initializers", "infinite_context.rb"),
+    "RubyLLM::InfiniteContext.encrypt_text = true\n")
+  run!(renv.merge("IC_ENCRYPT" => "1"), "bundle", "exec", "rails", "runner", "install_check_runner.rb", chdir: app, timeout: 180)
 
   puts "\nINSTALL CHECK PASSED"
 ensure

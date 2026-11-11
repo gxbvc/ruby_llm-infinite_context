@@ -57,7 +57,7 @@ module RubyLLM
         raise Error, "the record has no model_id yet" if model_id.to_s.empty?
 
         record = self
-        factory = -> { ChatOptions.build(record.model_id, Model.chat_options_for(record)) }
+        factory = -> { ChatOptions.build(record.model_id, Model.chat_options_for(record), role: "record") }
         Manager.attach(factory, key: "#{self.class.name}:#{id}", budget:, tokens:,
           compactor: options[:compactor], compactor_options: options[:compactor_options])
       end

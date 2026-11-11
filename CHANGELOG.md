@@ -4,7 +4,29 @@ All notable changes to this gem. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the gem follows
 [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] - not yet released
+## [0.2.0] - not yet released
+
+### Added
+
+- `RubyLLM::InfiniteContext.encrypt_text = true`: Active Record Encryption (non-deterministic)
+  on `ric_entries.text` and `ric_nodes.text`. It works if the models load before or after the
+  setting, declares `encrypts` once, and cannot be turned off again in the same process. The
+  gem never searches these columns in SQL, so every feature works with it on. The README shows
+  the setup, the rules, and how to declare it yourself with `to_prepare`.
+- `RubyLLM::InfiniteContext.required_protocol = :chat_completions`: every chat the gem builds
+  or uses (the compactor, the pump and `PumpJob`, `BatchImport`, each turn of `attach` and the
+  `Model` concern, and chats passed in by the caller) must use that protocol. Any other
+  protocol, none, a chat whose protocol cannot be read, or a fallback to another provider
+  raises `RubyLLM::InfiniteContext::ProtocolError` before a request is sent.
+- `rake test:encrypted` runs the whole suite again with encryption on; `rake` runs both.
+
+### Changed
+
+- `Manager#turn` builds the chat before it logs the user's message, so a chat that fails to
+  build leaves no half turn in the log.
+- The pump stops and raises on a `ProtocolError` instead of logging it and retrying.
+
+## [0.1.0] - 2026-11-09
 
 First version. The gem is not on rubygems.org yet.
 

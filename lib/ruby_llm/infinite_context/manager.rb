@@ -52,11 +52,12 @@ module RubyLLM
       end
 
       # One turn: log the user's message, ask with the view as instructions,
-      # log the reply, pump. A fresh Turn guards and caps the zooms.
+      # log the reply, pump. A fresh Turn guards and caps the zooms. The
+      # chat is built (and its protocol checked) before anything is logged.
       def turn(text)
+        chat = ChatOptions.check!(@chat_factory.call, "turn")
         tree.append(:user, text)
         turn = Turn.new
-        chat = @chat_factory.call
         chat.with_instructions("#{Prompts::VIEW_GUIDE}\n\n#{render_view}")
         chat.with_tools(*Tools.for_turn(tree, turn))
         reply = chat.ask(text)
