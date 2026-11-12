@@ -4,6 +4,38 @@ All notable changes to this gem. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the gem follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - not yet released
+
+### Fixed
+
+- `Pump::Runner` could wait forever. The main thread waited for one result from every worker
+  thread, and a worker sent its result only after a normal end or a `StandardError` inside
+  the Rails executor. A worker that ended any other way (an exception that is not a
+  `StandardError`, an error in the executor's own hooks, a killed thread) or that never ended
+  (stuck on a lock) left the pump waiting with no error. Found in production by GXB's comms
+  app, where five workers sat on a lock with no network traffic. Now:
+  - Every worker sends exactly one result, whatever ends it. A `StandardError` in the
+    executor's hooks and a killed worker are logged, and the node is tried again.
+  - An exception that is not a `StandardError` (`NoMemoryError`, `SystemStackError`,
+    `Interrupt`) is raised in the calling thread after the pass, like `ProtocolError`.
+  - Each pass has a limit, `pass_timeout:` (15 minutes by default, `nil` for none). Past it,
+    the log gets each stuck worker's location (file, line and method only), the stuck
+    threads are stopped, and the run raises `RubyLLM::InfiniteContext::PumpTimeout` (or a
+    fatal error that a worker reported before the limit). From that point no worker starts
+    to store a node, and a store already running gets 5 seconds to finish before the kill.
+    A thread that ignores the kill is left behind and logged. A model call that was already
+    sent cannot be taken back.
+  - A node counts as built only when the Rails executor has finished too. A logger that
+    raises no longer stops a worker from reporting.
+  - If every worker has ended and a result is still missing, the run raises
+    `RubyLLM::InfiniteContext::PumpWorkerLost` at once.
+  - If the calling thread leaves a pass early (an `Interrupt` there, for example), the
+    workers of that pass are stopped.
+- The pump loads RubyLLM's lazy constants once, before its first worker starts, so the
+  workers do not autoload them at the same time. The README ("Threads") shows how to do the
+  same for your own builder in a rake task or another process that does not eager-load.
+- `PumpJob` has no retry: a stopped pump fails the job once.
+
 ## [0.2.0] - not yet released
 
 ### Added

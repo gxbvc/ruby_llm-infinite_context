@@ -21,6 +21,13 @@ module RubyLLM
     # A chat does not use RubyLLM::InfiniteContext.required_protocol.
     class ProtocolError < Error; end
 
+    # A pump pass took longer than Pump::Runner's pass_timeout. The stuck
+    # workers were stopped and their locations logged.
+    class PumpTimeout < Error; end
+
+    # Every pump worker of a pass ended, and a result is still missing.
+    class PumpWorkerLost < Error; end
+
     NODE = 512              # target size of one summary line
     DEFAULT_VIEW_BUDGET = 128_000 # default consumer view budget, bytes
     COMPACT_VIEW_BUDGET = 24_000  # the compactor's own view, 16-32 KB

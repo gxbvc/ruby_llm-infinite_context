@@ -10,7 +10,8 @@ agent gets tools to zoom into any line, down to the original message.
 ## Status
 
 0.2.0 adds Active Record Encryption for the text columns and a way to require one wire
-protocol for every chat the gem uses (see below and `CHANGELOG.md`). The gem has been tested
+protocol for every chat the gem uses (see below and `CHANGELOG.md`). 0.2.1 fixes a pump
+that could wait forever for a lost or stuck worker thread (see "Threads"). The gem has been tested
 end to end on three
 real models: DeepSeek V4.1 Flash (11 of 12 questions right, 33 zooms), Claude Haiku 4.5
 (10 of 12 right, 31 zooms) and GLM-5.3 Flash (10 of 12 right, 26 zooms), each as both
@@ -246,6 +247,27 @@ tree = RubyLLM::InfiniteContext::Tree.for("thread-42", compactor: "accounts/fire
 old_messages.each { |m| tree.append(m.role == "assistant" ? :assistant : :user, m.content) }
 RubyLLM::InfiniteContext::Pump::Runner.new(tree).run   # plain chat completions, normal prices
 ```
+
+### Threads
+
+The pump builds up to 8 nodes at once, each in its own thread. When a pass ends:
+
+- A node that fails with a `StandardError` (in the compactor or in the Rails executor's own
+  hooks) is logged and tried again, up to `retries` times.
+- A `ProtocolError`, or any exception that is not a `StandardError` (`NoMemoryError`,
+  `SystemStackError`, `Interrupt`), stops the run: `run` raises it after the pass.
+- A pass that takes longer than `pass_timeout` seconds (15 minutes by default) stops: the
+  log gets each stuck worker's location (file, line and method only), the stuck threads are
+  stopped, and `run` raises `RubyLLM::InfiniteContext::PumpTimeout`. `pass_timeout: nil`
+  turns the limit off. `PumpJob` does not retry; the error goes to your queue backend.
+
+In a process that does not eager-load your app (a rake task, where Rails sets
+`rake_eager_load` to false, or development), the worker threads load your classes the first
+time they use them, all at once. Two files that refer to each other while they load can then
+wait on each other forever, and the pass times out. The gem loads RubyLLM before the first
+worker starts. If you pass your own `builder:` or `chat_options:`, load their classes first:
+call `Rails.application.eager_load!` at the start of the task, or set
+`config.rake_eager_load = true`.
 
 ## How it works
 

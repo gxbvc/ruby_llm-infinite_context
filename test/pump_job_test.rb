@@ -2,6 +2,7 @@
 
 require "test_helper"
 require "active_job"
+require "minitest/mock"
 
 # Define PumpJob now: at gem load time ActiveJob was not loaded, so the
 # class was skipped.
@@ -32,6 +33,26 @@ module RubyLLM
         count = Pump::Runner.new(tree, builder:, jobs: 1).run
         assert_equal 1, count
         assert tree.nodes.exists?(level: 0, i: 0)
+      end
+
+      # A stopped pump fails the job once: the error reaches the queue
+      # backend, and the job has no retry of its own.
+      def test_pump_job_raises_the_runners_error_and_does_not_retry
+        tree = Tree.create!(key: "pump-job-timeout")
+        stopped = Object.new
+        stopped.define_singleton_method(:run) { raise PumpTimeout, "stuck" }
+        logger = Object.new
+        logger.define_singleton_method(:error) { |*| nil }
+        rails = Module.new { class << self; attr_accessor :logger; end }
+        rails.logger = logger
+        created = !Object.const_defined?(:Rails)
+        Object.const_set(:Rails, rails) if created
+        Pump::Runner.stub(:new, stopped) do
+          assert_raises(PumpTimeout) { PumpJob.new.perform(tree.id) }
+        end
+        assert_empty PumpJob.rescue_handlers
+      ensure
+        Object.send(:remove_const, :Rails) if created
       end
     end
   end
