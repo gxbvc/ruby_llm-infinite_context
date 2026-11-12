@@ -6,7 +6,7 @@ require "tmpdir"
 
 module RubyLLM
   module InfiniteContext
-    # How a pump pass ends (0.2.1). Found in production by comms: the 0.2.0
+    # How a pump pass ends (0.2.1). Found in production in an app: the 0.2.0
     # Runner waited on a plain Queue#pop for one result per worker, and a
     # worker pushed only after a normal end or a StandardError inside the
     # executor block. Anything else (an exception that is not a
@@ -301,7 +301,7 @@ module RubyLLM
         assert_equal [], logged
       end
 
-      # The production hang (comms, Nov 12): workers stuck on a lock, no
+      # The production hang (Nov 12): workers stuck on a lock, no
       # network. One way to get there in a process that does not eager-load:
       # two workers autoload two files that refer to each other while they
       # load, and each waits for the other's require forever.

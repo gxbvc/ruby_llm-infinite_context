@@ -83,7 +83,7 @@ module RubyLLM
       # starts up to `jobs` builder threads and waits for them. `builder`
       # must answer build(level, i) and return [text, tries].
       #
-      # How a pass ends (0.2.1, after a production hang found in comms):
+      # How a pass ends (0.2.1, after a production hang in an app):
       # - Every worker reports exactly one result, whatever ends it: a normal
       #   end, a StandardError in the builder or in the Rails executor's own
       #   hooks (logged, the node counts as failed and is retried), any other

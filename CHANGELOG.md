@@ -12,8 +12,8 @@ All notable changes to this gem. The format follows
   thread, and a worker sent its result only after a normal end or a `StandardError` inside
   the Rails executor. A worker that ended any other way (an exception that is not a
   `StandardError`, an error in the executor's own hooks, a killed thread) or that never ended
-  (stuck on a lock) left the pump waiting with no error. Found in production by GXB's comms
-  app, where five workers sat on a lock with no network traffic. Now:
+  (stuck on a lock) left the pump waiting with no error. Found in production in one of GXB's
+  apps, where five workers sat on a lock with no network traffic. Now:
   - Every worker sends exactly one result, whatever ends it. A `StandardError` in the
     executor's hooks and a killed worker are logged, and the node is tried again.
   - An exception that is not a `StandardError` (`NoMemoryError`, `SystemStackError`,
