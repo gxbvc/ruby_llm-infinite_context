@@ -67,41 +67,51 @@ module RubyLLM
       # -- saved views, one per budget -------------------------------------
 
       # The saved view for `budget`, folded forward over entries that arrived
-      # after it was last saved. Never rebuilt from the log.
-      def view(budget = DEFAULT_VIEW_BUDGET)
-        record = views.find_by(budget: budget) || views.create!(budget:, parts: [], message_count: 0)
-        if record.message_count < entry_count
-          sizes = node_sizes
-          fold = Fold.new(parts: record.parts, budget: budget) { |l, i| sizes[[l, i]] }
-          record.message_count.upto(entry_count - 1) do |i|
-            fold.append(i)
-            fold.fit(i + 1)
-          end
-          record.update!(parts: fold.parts, message_count: entry_count)
-        end
-        record
+      # after it was last saved, then fitted again against the current line
+      # sizes (lines grow when the pump builds the nodes behind them). Never
+      # rebuilt from the log: the fit only merges, so the saved lines stay
+      # stable. Saved only when it changed, under the tree's row lock, from
+      # the row as it is then (a reader with older sizes cannot undo a
+      # newer reader's merges).
+      def view(budget = DEFAULT_VIEW_BUDGET) = view_and_sizes(budget).first
+
+      # The lines the agent is shown, as a Shown: `lines` (the stub line
+      # first when lines were left out), `parts` (the parts of the other
+      # lines, in order; use these, not the saved view's, for CacheMark) and
+      # `left_out` (how many lines were left out).
+      Shown = Data.define(:lines, :parts, :left_out)
+
+      # The lines inside <chat> tags (InfiniteContext.render_view) never
+      # pass `budget` bytes (at least MIN_VIEW_BUDGET):
+      # - While parents are pending, the saved view can stay over budget.
+      #   The lines shown then merge the most due pairs anyway, and a merged
+      #   line shows the placeholder until its node is built. This is not
+      #   saved.
+      # - If that is not enough, the oldest lines are left out behind one
+      #   short line, and `logger` gets the counts (no text).
+      def shown_view(budget = DEFAULT_VIEW_BUDGET, logger: nil)
+        InfiniteContext.check_view_budget!(budget)
+        record, sizes = view_and_sizes(budget)
+        total = record.message_count
+        parts = Fold.new(parts: record.parts, budget: budget, &sizes).fit(total, force: true).parts
+        within_budget(parts, total, budget, logger, hint: true)
       end
 
       # The view's rendered lines, oldest first: "id+n|text". A short entry
       # is its own line, word for word; a long one shows its compressed node
-      # or the placeholder until the pump builds it.
-      def view_lines(budget = DEFAULT_VIEW_BUDGET)
-        record = view(budget)
-        record.parts.map do |l, i|
-          text = line_text(l, i)
-          "#{TreeMath.label(l, i)}|#{TreeMath.flat(text)}"
-        end
-      end
+      # or the placeholder until the pump builds it. Within `budget` bytes
+      # inside <chat> tags: see shown_view.
+      def view_lines(budget = DEFAULT_VIEW_BUDGET, logger: nil) = shown_view(budget, logger:).lines
 
       # The summary lines covering entries [0, idx): the context the
-      # compactor reads before it builds a node.
+      # compactor reads before it builds a node. The lines of the saved view
+      # (no forced merge: the compactor never reads a placeholder for a
+      # stretch the pump has not built), within `budget` bytes: if they
+      # pass it while parents are pending, the oldest are left out.
       def context_before(idx, budget: COMPACT_VIEW_BUDGET)
-        record = view(budget)
-        record.parts.filter_map do |l, i|
-          next if TreeMath.last(l, i) > idx
-
-          "#{TreeMath.label(l, i)}|#{TreeMath.flat(line_text(l, i))}"
-        end
+        InfiniteContext.check_view_budget!(budget)
+        parts = view(budget).parts.select { |l, i| TreeMath.last(l, i) <= idx }
+        within_budget(parts, parts.empty? ? 0 : TreeMath.last(*parts.last), budget, nil, hint: false).lines
       end
 
       # -- counters and zoom events ----------------------------------------
@@ -135,6 +145,101 @@ module RubyLLM
       end
 
       private
+
+      # [saved view record, sizes] for `budget` (see #view). `sizes` is the
+      # size snapshot the fit used, for the caller's own fold.
+      def view_and_sizes(budget)
+        record = views.find_by(budget: budget)
+        if record
+          total = entry_count
+          sizes = line_sizes(record.parts, record.message_count, total)
+          parts = refit(record, budget, total, sizes)
+          return [record, sizes] if total == record.message_count && parts == record.parts
+        end
+        with_view_lock do
+          record = views.find_by(budget: budget) || views.create!(budget:, parts: [], message_count: 0)
+          total = entry_count
+          sizes = line_sizes(record.parts, record.message_count, total)
+          parts = refit(record, budget, total, sizes)
+          record.update!(parts:, message_count: total) if total != record.message_count || parts != record.parts
+          [record, sizes]
+        end
+      end
+
+      # The saved parts, folded forward to `total` entries and fitted again.
+      def refit(record, budget, total, sizes)
+        fold = Fold.new(parts: record.parts, budget: budget, &sizes)
+        record.message_count.upto(total - 1) do |i|
+          fold.append(i)
+          fold.fit(i + 1)
+        end
+        fold.fit(total).parts
+      end
+
+      # The size of the text each view line shows (see line_text), or nil
+      # when the part is not built. A short entry is its own line, built or
+      # not.
+      #
+      # Reads only the nodes a fit of `parts` (covering `upto` entries, then
+      # entries up to `total`) can show or merge into: a merge at level l
+      # only joins parts of level l or lower, so at level l only nodes from
+      # the first part of level l or lower onward matter. In a sawtooth view
+      # that is the recent end, so the cost does not grow with the log.
+      def line_sizes(parts, upto, total)
+        top = 0
+        top += 1 while (2 << top) <= total
+        starts = (0..top).map do |l|
+          part = parts.find { |pl, _| pl <= l }
+          (part ? TreeMath.first(*part) : upto) >> l
+        end
+        scope = starts.each_with_index.map { |from, l| nodes.where(level: l, i: from..) }.reduce { |a, b| a.or(b) }
+        sizes = scope.pluck(:level, :i, :bytes).to_h { |l, i, b| [[l, i], b] }
+        short = entries.where(idx: starts[0].., bytes: ..NODE).pluck(:idx, :bytes).to_h
+        ->(l, i) { (l.zero? && short[i]) || sizes[[l, i]] }
+      end
+
+      def line_for(l, i) = "#{TreeMath.label(l, i)}|#{TreeMath.flat(line_text(l, i))}"
+
+      # The last guard: renders `parts` (covering entries [0, total)) and, if
+      # the lines pass the budget inside <chat> tags, leaves out the oldest
+      # behind one short line. Returns a Shown.
+      def within_budget(parts, total, budget, logger, hint:)
+        lines = parts.map { |l, i| line_for(l, i) }
+        rendered = InfiniteContext.render_view(lines).bytesize
+        return Shown.new(lines:, parts:, left_out: 0) if rendered <= budget
+
+        # Rendered size of [stub, *lines[k..]]: "<chat>\n" + lines joined
+        # with "\n" + "\n</chat>" is 14 bytes plus each line plus one.
+        rest = lines.sum(&:bytesize) + lines.size
+        shown = nil
+        lines.each_index do |k|
+          rest -= lines[k].bytesize + 1
+          upto = (k + 1 < parts.size) ? TreeMath.first(*parts[k + 1]) : total
+          stub = omitted_line(upto, hint)
+          next unless 14 + stub.bytesize + 1 + rest <= budget
+
+          shown = Shown.new(lines: [stub, *lines[(k + 1)..]], parts: parts[(k + 1)..], left_out: k + 1)
+          break
+        end
+        # MIN_VIEW_BUDGET always holds the stub alone, so `shown` is set.
+        log_view(logger, "view over budget by #{rendered - budget} bytes: left out the " \
+          "#{shown.left_out} oldest of #{lines.size} lines")
+        shown
+      end
+
+      # The line that stands for the lines left out. It has no "id+n|"
+      # label, so it cannot be taken for a summary or zoomed as one.
+      def omitted_line(upto, hint)
+        "(messages 0 to #{upto - 1} are left out here to fit the view#{"; zoom(id, 1) still opens any of them" if hint})"
+      end
+
+      def log_view(logger, message)
+        return unless logger
+
+        logger.respond_to?(:call) ? logger.call(message) : logger.warn("[infinite_context] #{message}")
+      rescue
+        nil
+      end
 
       # The text a view line shows for part (l, i).
       def line_text(l, i)

@@ -24,15 +24,28 @@ module RubyLLM
     end
 
     # Resolves the budget from (bytes, tokens) arguments; bytes win when
-    # both are given.
+    # both are given. A budget under MIN_VIEW_BUDGET bytes raises
+    # ArgumentError.
     def self.resolve_budget(budget: nil, tokens: nil)
-      if budget
+      resolved = if budget
         budget
       elsif tokens
         token_bytes(tokens)
       else
         DEFAULT_VIEW_BUDGET
       end
+      check_view_budget!(resolved)
+    end
+
+    # Returns the budget, or raises ArgumentError when it is not an Integer
+    # of at least MIN_VIEW_BUDGET bytes (smaller views cannot be kept within
+    # their budget).
+    def self.check_view_budget!(budget)
+      unless budget.is_a?(Integer) && budget >= MIN_VIEW_BUDGET
+        raise ArgumentError, "a view budget must be an Integer of at least #{MIN_VIEW_BUDGET} bytes"
+      end
+
+      budget
     end
   end
 end

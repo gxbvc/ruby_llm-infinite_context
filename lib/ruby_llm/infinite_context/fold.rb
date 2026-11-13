@@ -2,19 +2,32 @@
 
 module RubyLLM
   module InfiniteContext
+    # The view as the agent receives it: the lines inside <chat> tags.
+    def self.render_view(lines) = "<chat>\n#{lines.join("\n")}\n</chat>"
+
     # The view (the sawtooth): a list of parts [level, i] that tiles the log
     # [0, T), oldest first. It only appends at the end and merges the most
     # due adjacent pair whose parent is built; it never splits. Older
     # stretches therefore sit in coarser and coarser lines, which gives the
     # view its sawtooth shape.
     #
-    # `size_of.call(level, i)` returns the bytes of a built node's text, or
-    # nil when the node is not built. An unbuilt part counts its placeholder.
+    # `size_of.call(level, i)` returns the bytes of the text the part's line
+    # shows, or nil when the node is not built. An unbuilt part counts its
+    # placeholder.
+    #
+    # The budget covers the whole rendered view: every line is counted as it
+    # is rendered ("id+n|text" plus its line break), and FRAME counts the
+    # <chat> tags around the lines (see InfiniteContext.render_view).
     #
     # `recall` (optional) slows the aging of stretches that were zoomed into,
     # by dividing the pair's due score. Ships unused: no Recall policy yet.
     class Fold
       include TreeMath
+
+      # Bytes of "<chat>\n" and "\n</chat>" around the lines, plus one: each
+      # line below is counted with a line break, and n lines have only
+      # n - 1 between them (the one left over covers an empty view).
+      FRAME = "<chat>\n\n</chat>".bytesize
 
       attr_reader :parts
 
@@ -35,28 +48,30 @@ module RubyLLM
         fold
       end
 
+      # The bytes one part's line costs when rendered: "id+n|text\n".
+      def self.line_bytes(l, i, text_bytes) = TreeMath.label(l, i).bytesize + 2 + text_bytes
+
       def append(i)
         @parts << [0, i]
         self
       end
 
-      def size = @parts.sum { |l, i| bytes(l, i) }
+      # The rendered size of the view, <chat> tags included (an upper bound:
+      # one byte more than the rendered text when there are lines).
+      def size = FRAME + @parts.sum { |l, i| bytes(l, i) }
 
-      def fit(total)
+      # Merges until the view fits the budget. Only pairs whose parent is
+      # built merge. With `force: true`, when no such pair is left and the
+      # view is still over budget, the most due aligned pair merges anyway:
+      # its line shows the placeholder (the agent can zoom it) until the
+      # pump builds the parent. A forced fold is for rendering only; do not
+      # save its parts (the pump reads saved views and builds a parent only
+      # after the lines before it are built).
+      def fit(total, force: false)
         size = self.size
         while size > @budget
-          best = nil
-          best_due = nil
-          @parts.each_cons(2).with_index do |(a, b), k|
-            next unless a[0] == b[0] && a[1].even? && b[1] == a[1] + 1 && built?(a[0] + 1, a[1] / 2)
-
-            due = Rational(total - TreeMath.first(*a), 1 << (a[0] + 2)) # age rule
-            due /= @recall.slowdown(TreeMath.first(*a), TreeMath.last(*b), total) if @recall
-            if best.nil? || due > best_due
-              best = k
-              best_due = due
-            end
-          end
+          best = most_due(total, built_only: true)
+          best ||= most_due(total, built_only: false) if force
           break unless best # wait until a parent is built
 
           a, b = @parts[best], @parts[best + 1]
@@ -75,9 +90,27 @@ module RubyLLM
 
       private
 
+      # Index of the first part of the most due aligned pair, or nil.
+      def most_due(total, built_only:)
+        best = nil
+        best_due = nil
+        @parts.each_cons(2).with_index do |(a, b), k|
+          next unless a[0] == b[0] && a[1].even? && b[1] == a[1] + 1
+          next if built_only && !built?(a[0] + 1, a[1] / 2)
+
+          due = Rational(total - TreeMath.first(*a), 1 << (a[0] + 2)) # age rule
+          due /= @recall.slowdown(TreeMath.first(*a), TreeMath.last(*b), total) if @recall
+          if best.nil? || due > best_due
+            best = k
+            best_due = due
+          end
+        end
+        best
+      end
+
       def built?(l, i) = !@size_of.call(l, i).nil?
 
-      def bytes(l, i) = @size_of.call(l, i) || PLACEHOLDER.bytesize
+      def bytes(l, i) = self.class.line_bytes(l, i, @size_of.call(l, i) || PLACEHOLDER.bytesize)
     end
   end
 end

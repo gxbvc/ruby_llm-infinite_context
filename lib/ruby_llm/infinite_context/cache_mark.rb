@@ -59,6 +59,16 @@ module RubyLLM
 
       Block = Data.define(:text, :mark)
 
+      # The blocks for a Tree::Shown (Tree#shown_view): the plan uses the
+      # parts of the lines shown, not the saved view's. When lines were left
+      # out, the leading line changes as more go, so no block gets a mark
+      # (all blocks are still sent, in order).
+      def self.shown_blocks(shown, total:, sizes:, previous_mark: [], budget: DEFAULT_VIEW_BUDGET, **options)
+        return blocks(shown.lines, Plan.new(cuts: [], mark: nil)) if shown.left_out.positive?
+
+        blocks(shown.lines, plan(parts: shown.parts, total:, sizes:, previous_mark:, budget:, **options))
+      end
+
       # The view as text blocks: "<chat>\n" opens the first block, every line
       # ends with "\n", and "</chat>" is a block of its own, so the text of a
       # block never depends on where the view ends.

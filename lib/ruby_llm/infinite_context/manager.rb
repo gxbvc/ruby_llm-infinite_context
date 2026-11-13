@@ -12,7 +12,7 @@ module RubyLLM
     #                                         compactor: "claude-haiku-4-5",
     #                                         tokens: 20_000)
     #   mem.turn("...")
-    #   mem.tree.view_lines(budget: 80_000)
+    #   mem.tree.view_lines(80_000)
     #   mem.tree.stats.hot_nodes(limit: 10)
     class Manager
       attr_reader :tree, :budget
@@ -68,8 +68,10 @@ module RubyLLM
         reply
       end
 
+      # The view inside <chat> tags; never more than `budget` bytes (see
+      # Tree#view_lines).
       def render_view
-        "<chat>\n#{tree.view_lines(budget).join("\n")}\n</chat>"
+        InfiniteContext.render_view(tree.view_lines(budget, logger: @logger))
       end
 
       # :sync pumps now; :job uses PumpJob (ActiveJob) when defined, else a

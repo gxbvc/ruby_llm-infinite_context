@@ -31,6 +31,7 @@ module RubyLLM
     NODE = 512              # target size of one summary line
     DEFAULT_VIEW_BUDGET = 128_000 # default consumer view budget, bytes
     COMPACT_VIEW_BUDGET = 24_000  # the compactor's own view, 16-32 KB
+    MIN_VIEW_BUDGET = 256   # smallest view budget: the <chat> tags and the line that says lines were left out
     JOBS = 8                # compactor calls at once
     MARGIN = 64             # bytes a non-Claude compactor is asked to stay under NODE
     TRIES = 5               # attempts per node to get under NODE

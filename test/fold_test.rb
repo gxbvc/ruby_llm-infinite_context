@@ -29,39 +29,77 @@ module RubyLLM
       end
 
       def test_over_budget_merges_the_most_due_pair_by_age
-        # T=4: [0,0] [0,1] [0,2] [0,3] is 40 > 35. Pair (0,1) is due 4/4 = 1,
+        # Each line "i+1|" + 10 bytes + line break is 15 bytes, plus FRAME (15)
+        # for the <chat> tags.
+        # T=4: [0,0] [0,1] [0,2] [0,3] is 75 > 65. Pair (0,1) is due 4/4 = 1,
         # pair (2,3) is due 2/4: the older pair merges.
-        assert_equal [[1, 0], [0, 2], [0, 3]], fold(4, budget: 35).parts
+        assert_equal [[1, 0], [0, 2], [0, 3]], fold(4, budget: 65).parts
         # T=5: only (2,3) can merge; (3,4) is not an aligned pair.
-        assert_equal [[1, 0], [1, 1], [0, 4]], fold(5, budget: 35).parts
+        assert_equal [[1, 0], [1, 1], [0, 4]], fold(5, budget: 65).parts
         # T=6: [1,0][1,1] is due 6/8 and (4,5) is due 2/4: the old pair merges.
-        assert_equal [[2, 0], [0, 4], [0, 5]], fold(6, budget: 35).parts
+        assert_equal [[2, 0], [0, 4], [0, 5]], fold(6, budget: 65).parts
         # T=7: (4,5) is the only aligned pair.
-        assert_equal [[2, 0], [1, 2], [0, 6]], fold(7, budget: 35).parts
+        assert_equal [[2, 0], [1, 2], [0, 6]], fold(7, budget: 65).parts
       end
 
       def test_a_pair_whose_parent_is_not_built_is_passed_over
-        assert_equal [[0, 0], [0, 1], [1, 1]], fold(4, budget: 35, unbuilt: [[1, 0]]).parts
+        assert_equal [[0, 0], [0, 1], [1, 1]], fold(4, budget: 65, unbuilt: [[1, 0]]).parts
       end
 
       def test_with_no_parent_built_the_view_stays_over_budget
-        parts = fold(4, budget: 35, unbuilt: [[1, 0], [1, 1]]).parts
+        parts = fold(4, budget: 65, unbuilt: [[1, 0], [1, 1]]).parts
         assert_equal (0...4).map { |i| [0, i] }, parts
       end
 
       def test_an_unbuilt_part_counts_its_placeholder
         f = Fold.new(parts: [[0, 0], [0, 1]]) { |l, i| i.zero? ? 10 : nil }
-        assert_equal 10 + PLACEHOLDER.bytesize, f.size
+        assert_equal Fold::FRAME + ("0+1|".bytesize + 10 + 1) + ("1+1|".bytesize + PLACEHOLDER.bytesize + 1), f.size
+      end
+
+      # Cause 2 of the over-budget report: the fold counted node text only.
+      def test_size_counts_the_label_the_bar_the_line_break_and_the_chat_tags
+        texts = {[2, 0] => "a" * 40, [1, 2] => "b" * 7, [0, 6] => "c"}
+        f = Fold.new(parts: texts.keys) { |l, i| texts[[l, i]]&.bytesize }
+        rendered = InfiniteContext.render_view(texts.map { |(l, i), t| "#{TreeMath.label(l, i)}|#{t}" })
+        assert_equal rendered.bytesize + 1, f.size # one spare byte: n lines, n - 1 breaks
+        assert_operator InfiniteContext.render_view([]).bytesize, :<=, Fold.new { 0 }.size
+      end
+
+      # Cause 3: with parents pending, a plain fit stops over budget; a
+      # forced fit merges unbuilt parents (shown as placeholders) until it fits.
+      def test_a_forced_fit_merges_pairs_whose_parent_is_not_built
+        s = ->(l, i) { l.zero? ? 100 : nil }
+        plain = Fold.from_scratch(8, budget: 600) { |l, i| s.call(l, i) }
+        assert_equal (0...8).map { |i| [0, i] }, plain.parts
+        assert_operator plain.size, :>, 600
+        forced = Fold.new(parts: plain.parts, budget: 600) { |l, i| s.call(l, i) }.fit(8, force: true)
+        assert_operator forced.size, :<=, 600
+        assert_tiles forced.parts, 8
+        # The oldest (most due) pair merged first.
+        assert_equal [1, 0], forced.parts.first
+      end
+
+      def test_a_forced_fit_still_prefers_a_pair_whose_parent_is_built
+        sizes = {[1, 1] => 50}
+        4.times { |i| sizes[[0, i]] = 100 }
+        s = ->(l, i) { sizes[[l, i]] }
+        f = Fold.new(parts: (0...4).map { |i| [0, i] }, budget: 400) { |l, i| s.call(l, i) }.fit(4, force: true)
+        assert_equal [[0, 0], [0, 1], [1, 1]], f.parts
+      end
+
+      def test_a_forced_fit_stops_when_no_aligned_pair_is_left
+        f = Fold.new(parts: [[2, 0], [0, 4]], budget: 20) { 100 }.fit(5, force: true)
+        assert_equal [[2, 0], [0, 4]], f.parts
       end
 
       def test_the_view_only_appends_and_coarsens
         s = sizer
-        f = Fold.new(budget: 120) { |l, i| s.call(l, i) }
+        f = Fold.new(budget: 220) { |l, i| s.call(l, i) }
         previous = []
         200.times do |i|
           f.append(i).fit(i + 1)
           assert_tiles f.parts, i + 1
-          assert_operator f.size, :<=, 120
+          assert_operator f.size, :<=, 220
           previous.each do |l, j|
             assert(f.parts.any? { |pl, pi| pl >= l && TreeMath.first(pl, pi) <= TreeMath.first(l, j) && TreeMath.last(l, j) <= TreeMath.last(pl, pi) },
               "part #{[l, j].inspect} was split at T=#{i + 1}")

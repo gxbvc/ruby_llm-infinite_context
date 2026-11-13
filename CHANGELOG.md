@@ -4,6 +4,60 @@ All notable changes to this gem. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the gem follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] - not yet released
+
+### Fixed
+
+- The view could be larger than its budget. In one app a view at `tokens: 20_000` (80,000
+  bytes) was 101,096 bytes. Found by a GXB app's tree check. Four causes, all fixed:
+  - A saved view was fitted only when new entries arrived. When the pump later built the
+    nodes behind its lines, each line grew from the placeholder to its summary, and nothing
+    merged them. Now the saved view is fitted again at every read. The fit only merges
+    lines, so the saved view stays stable, and it is saved only when it changed.
+  - The fold counted the text of each line, but not its `id+n|` label, its line break or
+    the `<chat>` tags (about 2% over). Now the budget covers the whole rendered view.
+  - While parents were not built, the fold stopped over budget with no limit. Now the
+    lines shown merge the most due pairs anyway; a merged line shows the placeholder (the
+    agent can zoom it) until the pump builds it. This merge is not saved, so the pump's
+    order does not change.
+  - A short entry with no node was counted as the 30-byte placeholder but shown word for
+    word (up to 512 bytes). Now it counts at its own size.
+- A last guard: if the view is still over budget, `Tree#view_lines` leaves out the oldest
+  lines behind one short line ("(messages 0 to N are left out here to fit the view; zoom(id,
+  1) still opens any of them)", with no `id+n|` label) and logs the counts (no text) to the
+  `logger:` it is given (the Manager passes its own). What the agent receives, with the
+  `<chat>` tags, is never over the budget.
+- The compactor's context (`Tree#context_before`) could also pass its 24 KB budget while
+  parents were pending. It now leaves out its oldest lines the same way (no forced merge,
+  so the compactor never reads a placeholder for a stretch the pump has not built).
+- Two readers of the same saved view could write it at the same time, and a reader with
+  older node sizes could undo a newer reader's merges. A changed view is now written under
+  the tree's row lock, fitted again from the row as it is then.
+- The README and a code comment showed `view_lines(budget: 80_000)`; the budget is a
+  positional argument: `view_lines(80_000)`.
+
+### Added
+
+- `Pump::Runner` hooks. `before_pass:` is called before each pass with the number of nodes
+  it would start; if it returns false or raises `Pump::Hold`, the run ends before the pass
+  sends anything (`held?` is true). An error in it ends the run too and is logged by class.
+  `on_result:` is called once per node result with a `Pump::Result` (`level`, `index`,
+  `ok`, `tries`; numbers only), also for a pass that ended with an error. A `StandardError`
+  in it is logged by class and ignored; any other exception (`Interrupt`) is raised after
+  every result was reported and after the pass's own error, if there is one. No result is lost.
+- `RubyLLM::InfiniteContext.render_view(lines)`: the view as the agent receives it.
+- `Tree#shown_view(budget, logger:)`: the lines shown with the parts behind them and the
+  number of lines left out. `CacheMark.shown_blocks(shown, ...)` plans the cache blocks
+  against those parts, and sends no mark when lines were left out.
+- `MIN_VIEW_BUDGET` (256 bytes). A smaller view budget raises `ArgumentError`.
+
+### Changed
+
+- Views now merge a little earlier than before (labels and line breaks count), so a saved
+  view can change shape at the first read after the upgrade. It only merges; no line splits.
+- A view read loads the sizes of the nodes at the recent end of the view only, not of every
+  node, so it does not grow slower with the log.
+
 ## [0.2.2] - not yet released
 
 ### Fixed

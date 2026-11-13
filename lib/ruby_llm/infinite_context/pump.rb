@@ -13,6 +13,17 @@ module RubyLLM
     module Pump
       PRELOAD_LOCK = Mutex.new
 
+      # Raised by a Runner's before_pass hook to end the run before the pass.
+      class Hold < Error; end
+
+      # One node's result, for a Runner's on_result hook. Numbers only:
+      # level and index name the node, ok is true when it was built and
+      # stored, tries is the builder's model calls for it (nil when it
+      # failed).
+      Result = Data.define(:level, :index, :ok, :tries) do
+        def ok? = ok
+      end
+
       # The nodes to start now, in order: levels from 0 up, and in each
       # level from the left. `built` and `busy` are sets of [level, i].
       def self.ready_nodes(total:, first:, built:, busy:, slots:)
@@ -103,6 +114,20 @@ module RubyLLM
       #   raises PumpWorkerLost at once.
       # - If the calling thread leaves a pass early (an Interrupt there), the
       #   pass's workers are stopped the same way.
+      #
+      # Hooks (0.2.3), both optional, both called in the calling thread:
+      # - `before_pass: ->(count) { ... }` runs before each pass with the
+      #   number of nodes the pass would start. If it returns false or raises
+      #   Pump::Hold, the run ends there, before the pass starts any node
+      #   (no model call is sent), and `held?` is true. If it raises any
+      #   other error, the run ends the same way (a gate that cannot decide
+      #   lets nothing through) and the error's class is logged.
+      # - `on_result: ->(result) { ... }` runs once for each result a pass
+      #   reports (a node retried in a later pass reports again), after the
+      #   pass, with a Pump::Result: level, index, ok, tries. Numbers only,
+      #   never text. It also runs for the results a pass had before it
+      #   ended with an error. An error in it is logged (class only) and
+      #   ignored: no result is lost and the run goes on.
       class Runner
         include TreeMath
 
@@ -118,11 +143,15 @@ module RubyLLM
 
         # chat_options: for the default Compactor (ignored when `builder:` is given).
         # pass_timeout: seconds one pass may take (nil: no limit).
+        # before_pass, on_result: see Hooks above.
         def initialize(tree, builder: nil, jobs: JOBS, retries: 3, logger: nil, chat_options: nil,
-          pass_timeout: PASS_TIMEOUT)
+          pass_timeout: PASS_TIMEOUT, before_pass: nil, on_result: nil)
           valid = pass_timeout.nil? || (pass_timeout.is_a?(Numeric) && pass_timeout.positive?)
           unless valid
             raise ArgumentError, "pass_timeout must be a positive number of seconds or nil"
+          end
+          [[:before_pass, before_pass], [:on_result, on_result]].each do |name, hook|
+            raise ArgumentError, "#{name} must respond to call" unless hook.nil? || hook.respond_to?(:call)
           end
 
           @tree = tree
@@ -133,7 +162,13 @@ module RubyLLM
           @logger = logger
           @pass_timeout = pass_timeout
           @stop_wait = STOP_WAIT
+          @before_pass = before_pass
+          @on_result = on_result
+          @held = false
         end
+
+        # True when before_pass ended the last run.
+        def held? = @held
 
         # Returns the number of nodes built.
         #
@@ -147,11 +182,16 @@ module RubyLLM
         def run
           built = 0
           attempts = Hash.new(0)
+          @held = false
           ::ActiveRecord::Base.uncached do
             loop do
               nodes = startable(Set.new)
               nodes.reject! { |n| attempts[n] >= @retries }
               break if nodes.empty?
+              unless pass_allowed?(nodes.size)
+                @held = true
+                break
+              end
 
               Pump.preload
               run_pass(nodes).each do |node, ok|
@@ -172,6 +212,37 @@ module RubyLLM
 
         private
 
+        # Asks before_pass. False on false, on Hold and on any other error.
+        def pass_allowed?(count)
+          return true unless @before_pass
+
+          @before_pass.call(count) != false
+        rescue Hold
+          false
+        rescue => e
+          log("before_pass raised #{e.class}; the run stops before the pass")
+          false
+        end
+
+        # Calls on_result once per result, for every result even when a call
+        # raises. A StandardError in the hook is logged and ignored. Any other
+        # exception (Interrupt...) is logged too, and the first one is
+        # returned so the caller can raise it after the pass's own error.
+        def report(results)
+          return unless @on_result
+
+          held = nil
+          results.each do |(level, i), ok, _fatal, tries|
+            @on_result.call(Result.new(level:, index: i, ok:, tries: ok ? tries : nil))
+          rescue => e
+            log("on_result raised #{e.class}; ignored")
+          rescue Exception => e # standard:disable Lint/RescueException
+            log("on_result raised #{e.class}")
+            held ||= e
+          end
+          held
+        end
+
         def startable(busy)
           @tree.with_view_lock do
             sizes = @tree.node_sizes
@@ -188,12 +259,13 @@ module RubyLLM
           stop = Stop.new
           threads = nodes.map { |node| Thread.new { work(node, done, stop) } }
           results = nil
+          seen = [] # every result collected, also when the pass ends early
           begin
             # While this thread waits, the workers may autoload constants. With
             # reloading on (Rails development) that needs the load interlock, so
             # the wait must permit concurrent loads or the pass deadlocks.
             results = Pump.waiting do
-              out = collect(nodes, done, threads, stop)
+              out = collect(nodes, done, threads, stop, seen)
               threads.each { |thread| thread.join(@stop_wait) }
               out
             end
@@ -201,9 +273,13 @@ module RubyLLM
             # This thread left the wait early (a timeout, a lost worker, an
             # Interrupt here): no worker of this pass keeps running or writes.
             stop_workers(threads, stop) unless results || stop.set?
+            # When the pass is ending with an error (results is nil), that
+            # error goes on; an exception from on_result is only logged.
+            hook_error = report(seen)
           end
-          fatal = results.map(&:last).compact.first
+          fatal = results.map { |r| r[2] }.compact.first
           raise fatal if fatal
+          raise hook_error if hook_error
 
           results.map { |node, ok, _| [node, ok] }
         end
@@ -273,7 +349,7 @@ module RubyLLM
             Pump.wrap_thread do
               text, tries = @builder.build(*node)
               stop.store { @tree.store_node!(*node, text, tries:) }
-              inner = [node, true, nil]
+              inner = [node, true, nil, tries]
             rescue ProtocolError => e
               # A setup error, not a flaky call: no retry, raised after the pass.
               inner = [node, false, e]
@@ -308,9 +384,8 @@ module RubyLLM
         # the pass timeout (or a worker's fatal error that came before it) and
         # PumpWorkerLost when every worker has ended and a result is still
         # missing.
-        def collect(nodes, done, threads, stop)
+        def collect(nodes, done, threads, stop, results = [])
           deadline = @pass_timeout && now + @pass_timeout
-          results = []
           while results.size < nodes.size
             wait = deadline ? (deadline - now).clamp(0, POLL) : POLL
             result = done.pop(timeout: wait)
@@ -351,7 +426,7 @@ module RubyLLM
             log("#{storing} stuck worker threads were still storing a node when the pass was given up")
           end
           drain(done, results) # the stopped workers' results, a fatal error among them
-          fatal = results.map(&:last).compact.first
+          fatal = results.map { |r| r[2] }.compact.first
           raise fatal if fatal
 
           raise PumpTimeout, "a pump pass took longer than #{@pass_timeout} s; " \

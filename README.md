@@ -14,6 +14,8 @@ protocol for every chat the gem uses (see below and `CHANGELOG.md`). 0.2.1 fixes
 that could wait forever for a lost or stuck worker thread (see "Threads"). 0.2.2 fixes the zoom
 repeat guard: after opening a pair of messages, the agent could not open the first message
 of that pair in the same turn (and the reverse). Zoom counters now land on the line opened.
+0.2.3 fixes a view that could be larger than its budget (26% over in one app; see "How it
+works", Views) and adds two hooks to `Pump::Runner` (see "Threads").
 The gem has been tested
 end to end on three
 real models: DeepSeek V4.1 Flash (11 of 12 questions right, 33 zooms), Claude Haiku 4.5
@@ -59,7 +61,7 @@ memory = RubyLLM::InfiniteContext.attach(chat, key: "conv-1",
                                          compactor: "claude-haiku-4-5",
                                          tokens: 20_000)
 memory.turn("...")
-memory.tree.view_lines(budget: 80_000)   # the saved view, "id+n|text" lines
+memory.tree.view_lines(80_000)   # the view, "id+n|text" lines, within 80,000 bytes
 memory.tree.stats.hot_nodes(limit: 10)   # the most opened lines
 ```
 
@@ -264,6 +266,24 @@ The pump builds up to 8 nodes at once, each in its own thread. When a pass ends:
   stopped, and `run` raises `RubyLLM::InfiniteContext::PumpTimeout`. `pass_timeout: nil`
   turns the limit off. `PumpJob` does not retry; the error goes to your queue backend.
 
+Two optional hooks, both called in the thread that called `run`:
+
+```ruby
+runner = RubyLLM::InfiniteContext::Pump::Runner.new(tree,
+  before_pass: ->(count) { spend_ok?(count) },         # false or Pump::Hold: stop before the pass
+  on_result: ->(r) { stats.add(r.level, r.index, r.ok, r.tries) })
+runner.run
+runner.held?   # true when before_pass stopped the run
+```
+
+- `before_pass` gets the number of nodes the next pass would start. If it returns `false` or
+  raises `RubyLLM::InfiniteContext::Pump::Hold`, `run` returns at once, before the pass
+  sends any model call. Any other error in it also stops the run (its class is logged).
+- `on_result` gets one `Pump::Result` (`level`, `index`, `ok`, `tries`; numbers only, never
+  text) for each node result, after each pass, also for a pass that ended with an error.
+  `tries` is nil for a failed node. A `StandardError` in it is logged (its class only) and
+  ignored; any other exception (`Interrupt`) is raised after all the pass's results.
+
 In a process that does not eager-load your app (a rake task, where Rails sets
 `rake_eager_load` to false, or development), the worker threads load your classes the first
 time they use them, all at once. Two files that refer to each other while they load can then
@@ -281,7 +301,14 @@ call `Rails.application.eager_load!` at the start of the task, or set
   bytes (the shortest try wins). Built once, never recomputed.
 - **Views** (`ric_views`): one saved view per budget. The view only appends at the end and
   merges the most due adjacent pair whose parent is built; it never splits, so older stretches
-  sit in coarser and coarser lines (the sawtooth). A saved view is never rebuilt from the log.
+  sit in coarser and coarser lines (the sawtooth). A saved view is never rebuilt from the log;
+  at each read it is fitted again, because lines grow when the pump builds their nodes.
+  The budget covers the whole text the agent receives: each line with its `id+n|` label and
+  line break, and the `<chat>` tags. While parents are not built yet, the lines shown merge
+  anyway (a merged line shows "not summarized yet" until the pump builds it), and if that is
+  not enough the oldest lines are left out behind one short line, and the logger gets the
+  count. `view_lines(budget)` never returns more than the budget (at least 256 bytes,
+  `MIN_VIEW_BUDGET`). The compactor's own context is bounded the same way.
   The compactor works against its own 24 KB view, separate from whatever the consumer sees.
 - **Zoom** (`ric_zoom_events`): `zoom(id, n)` opens a line into the two lines it was built
   from; `zoom(id, 1)` shows the message, paged when long (`read(id, page)`). Opening a line
@@ -294,7 +321,8 @@ call `Rails.application.eager_load!` at the start of the task, or set
   as one fact.
 - **Prompt caching** (`CacheMark`): for providers that accept explicit cache breakpoints
   (Anthropic), the view is sent as fixed blocks of 8 parts with one mark on the part the next
-  messages will not change. Other providers rely on implicit prefix caching.
+  messages will not change. Other providers rely on implicit prefix caching. Build the blocks from
+  `tree.shown_view(budget)` with `CacheMark.shown_blocks`: it plans against the lines shown.
 
 ## SQLite and Postgres
 
