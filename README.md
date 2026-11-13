@@ -11,7 +11,10 @@ agent gets tools to zoom into any line, down to the original message.
 
 0.2.0 adds Active Record Encryption for the text columns and a way to require one wire
 protocol for every chat the gem uses (see below and `CHANGELOG.md`). 0.2.1 fixes a pump
-that could wait forever for a lost or stuck worker thread (see "Threads"). The gem has been tested
+that could wait forever for a lost or stuck worker thread (see "Threads"). 0.2.2 fixes the zoom
+repeat guard: after opening a pair of messages, the agent could not open the first message
+of that pair in the same turn (and the reverse). Zoom counters now land on the line opened.
+The gem has been tested
 end to end on three
 real models: DeepSeek V4.1 Flash (11 of 12 questions right, 33 zooms), Claude Haiku 4.5
 (10 of 12 right, 31 zooms) and GLM-5.3 Flash (10 of 12 right, 26 zooms), each as both

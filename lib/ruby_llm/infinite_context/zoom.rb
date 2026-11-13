@@ -47,7 +47,12 @@ module RubyLLM
 
         return leaf(id) if n == 1
 
-        label = TreeMath.label(level_of(n), left_of(id, n))
+        # The line opened is node (level + 1, id / n), labelled "id+n" as in
+        # the view. The repeat check, the cap and the counters all use it;
+        # the two children it shows are separate lines the agent may open next.
+        opened_level = level_of(n) + 1
+        opened_i = id / n
+        label = TreeMath.label(opened_level, opened_i)
         return already_opened(label) if @turn.repeat?(label)
         return cap_message if @turn.cap_reached?
 
@@ -58,7 +63,7 @@ module RubyLLM
           child = @tree.node_text(level, i)
           child ? "#{TreeMath.label(level, i)}|#{TreeMath.flat(child)}" : "#{TreeMath.label(level, i)}|#{PLACEHOLDER}"
         end.join("\n")
-        @tree.record_zoom!(level:, i: left, leaf_idx: nil, steps: @turn.zooms, session: @turn.id)
+        @tree.record_zoom!(level: opened_level, i: opened_i, leaf_idx: nil, steps: @turn.zooms, session: @turn.id)
         text
       rescue ArgumentError, TypeError
         "No line #{id}+#{n}."

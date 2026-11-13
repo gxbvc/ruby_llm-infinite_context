@@ -4,6 +4,30 @@ All notable changes to this gem. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the gem follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - not yet released
+
+### Fixed
+
+- `zoom(id, n)` with `n` of 2 or more recorded the wrong line as opened. It recorded the
+  left child it showed (the line `id+n/2`), not the line it opened (`id+n`). So the repeat
+  guard treated `zoom(id, 2)` and `zoom(id, 1)` as the same line: after `zoom(id, 2)`, the
+  agent could not open message `id` (the even message of the pair) in that turn, and after
+  `zoom(id, 1)` it could not open the pair. Zooms with `n` of 4 or more did not block each
+  other, but the "already opened" message named the child, not the line. Now a zoom records the
+  line it opened. A repeat of the same zoom is still refused, both children and both
+  messages of a pair can be opened in the same turn, and the per-turn cap counts each opened
+  line once. Found by a GXB app's tree check.
+- The counters had the same error. For `n` of 2 or more, the zoom event (`level`, `i`) and
+  the node's `dig_count` and `last_dug_at` were recorded on the left child, not on the line
+  opened. Now they are recorded on the line opened: `zoom(id, n)` counts node
+  `(log2(n), id / n)`. Zoom events written by 0.2.0 and 0.2.1 are one level too low for `n`
+  of 2 or more: an event at `(level, i)` with `leaf_idx` nil was really an open of
+  `(level + 1, i / 2)`. Message zooms (`zoom(id, 1)`, `leaf_idx` set) were recorded
+  correctly. Because the pump stores short messages as level-0 nodes, the even message of
+  each pair also got the dig counts of its pair. A node's `dig_count` can mix both kinds of
+  open, so it cannot be corrected by itself; to correct old counters, rebuild `dig_count`
+  and `last_dug_at` from the zoom events with the mapping above.
+
 ## [0.2.1] - not yet released
 
 ### Fixed
