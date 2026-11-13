@@ -53,6 +53,23 @@ module RubyLLM
         assert_equal "claude-haiku-4-5", manager.tree.compactor_model
       end
 
+      def test_search_options_pass_through_and_can_be_overridden_per_memory
+        FakeConversation.has_infinite_context(compactor: "claude-haiku-4-5")
+        refute FakeConversation.new("m", 21).with_infinite_context(tokens: 1_000).search?
+
+        mask = ->(t) { t }
+        FakeConversation.has_infinite_context(compactor: "claude-haiku-4-5", search: true, search_mask: mask,
+          search_cap: 2)
+        memory = FakeConversation.new("m", 22).with_infinite_context(tokens: 1_000)
+        assert memory.search?
+        assert_same mask, memory.search_mask
+        assert_equal 2, memory.search_cap
+        refute FakeConversation.new("m", 23).with_infinite_context(tokens: 1_000, search: false).search?
+        assert_equal 1, FakeConversation.new("m", 24).with_infinite_context(tokens: 1_000, search_cap: 1).search_cap
+        assert_raises(ArgumentError) { FakeConversation.new("m", 25).with_infinite_context(tokens: 1_000, serch: true) }
+        assert_raises(ArgumentError) { FakeConversation.has_infinite_context(search: true, search_mask: :nope) }
+      end
+
       def test_with_infinite_context_needs_has_infinite_context_first
         assert_raises(Error) { FakeConversation.new("claude-haiku-4-5", 9).with_infinite_context(tokens: 1_000) }
       end

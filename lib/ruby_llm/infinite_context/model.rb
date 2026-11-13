@@ -38,8 +38,13 @@ module RubyLLM
       end
 
       module ClassMethods
-        def has_infinite_context(compactor: nil, compactor_options: nil)
-          @infinite_context_options = {compactor: compactor, compactor_options: compactor_options}
+        # search:, search_mask:, search_cap: as for Manager.new (search is
+        # off by default).
+        def has_infinite_context(compactor: nil, compactor_options: nil, search: false, search_mask: nil,
+          search_cap: SEARCH_CAP_PER_TURN)
+          @infinite_context_options = {compactor: compactor, compactor_options: compactor_options,
+                                       search: search ? true : false, search_mask: Search.check_mask!(search_mask),
+                                       search_cap: Search.check_cap!(search_cap)}
         end
 
         def infinite_context_options
@@ -47,8 +52,12 @@ module RubyLLM
         end
       end
 
-      def with_infinite_context(budget: nil, tokens: nil)
+      # search:, search_mask:, search_cap: override has_infinite_context's
+      # for this memory.
+      def with_infinite_context(budget: nil, tokens: nil, logger: nil, **search_options)
         options = self.class.infinite_context_options
+        unknown = search_options.keys - %i[search search_mask search_cap]
+        raise ArgumentError, "unknown keywords: #{unknown.join(", ")}" unless unknown.empty?
         raise Error, "call has_infinite_context first" unless options
 
         unless respond_to?(:to_llm) && respond_to?(:model_id)
@@ -58,8 +67,9 @@ module RubyLLM
 
         record = self
         factory = -> { ChatOptions.build(record.model_id, Model.chat_options_for(record), role: "record") }
-        Manager.attach(factory, key: "#{self.class.name}:#{id}", budget:, tokens:,
-          compactor: options[:compactor], compactor_options: options[:compactor_options])
+        search = options.slice(:search, :search_mask, :search_cap).merge(search_options)
+        Manager.attach(factory, key: "#{self.class.name}:#{id}", budget:, tokens:, logger:,
+          compactor: options[:compactor], compactor_options: options[:compactor_options], **search)
       end
     end
   end

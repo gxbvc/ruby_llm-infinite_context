@@ -19,7 +19,7 @@ module RubyLLM
       end
 
       def test_version_license_and_ruby_requirement
-        assert_equal "0.2.3", SPEC.version.to_s
+        assert_equal "0.3.0", SPEC.version.to_s
         assert_equal RubyLLM::InfiniteContext::VERSION, SPEC.version.to_s
         assert_equal ["MIT"], SPEC.licenses
         assert_operator SPEC.required_ruby_version.to_s, :==, ">= 3.2.0"

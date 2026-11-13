@@ -39,6 +39,13 @@ module RubyLLM
     PAGE = 4_000            # bytes per page when reading a long message
     PLACEHOLDER = "(not summarized yet: zoom it)"
     ZOOM_CAP_PER_TURN = 12  # max lines the agent may open in one turn
+    SEARCH_CAP_PER_TURN = 3 # max searches in one turn (the search tool is off by default)
+    SEARCH_RESULTS = 10     # max message ids one search returns
+    SEARCH_MAX_WORDS = 8    # max words one search uses
+    SEARCH_SCAN_LIMIT = 20_000 # max messages one search reads
+    SEARCH_TIME_LIMIT = 2.0 # max seconds one search runs
+    SEARCH_BATCH = 500      # messages loaded at once by a search
+    DATE_FORMAT = "%a %Y-%m-%d %H:%M %Z" # dates in the date and search tools
     KINDS = %w[user assistant tool echo note].freeze
   end
 end
@@ -54,6 +61,7 @@ require_relative "infinite_context/compactor"
 require_relative "infinite_context/pump"
 require_relative "infinite_context/cache_mark"
 require_relative "infinite_context/zoom"
+require_relative "infinite_context/search"
 require_relative "infinite_context/tools"
 require_relative "infinite_context/batch_import"
 require_relative "infinite_context/manager"

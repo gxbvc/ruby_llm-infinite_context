@@ -46,6 +46,19 @@ module RubyLLM
         names = chat.render[:tools].map { |tool| tool[:name] || tool["name"] }
         assert_equal %w[zoom read date], names
       end
+
+      def test_with_search_on_the_wire_has_a_fourth_tool_named_search
+        tree = Tree.for("tools-wire-search", compactor: "x")
+        tree.append(:user, "hello")
+        tools = Tools.for_turn(tree, Turn.new, search: true)
+        chat = RubyLLM.chat(model: "claude-haiku-4-5").with_tools(*tools)
+        chat.add_message(role: :user, content: "q")
+        rendered = chat.render[:tools]
+        assert_equal %w[zoom read date search], rendered.map { |tool| tool[:name] || tool["name"] }
+        schema = rendered.last[:input_schema] || rendered.last["input_schema"]
+        assert_equal ["words"], (schema[:required] || schema["required"]).map(&:to_s)
+        assert_equal %w[before words], (schema[:properties] || schema["properties"]).keys.map(&:to_s).sort
+      end
     end
   end
 end

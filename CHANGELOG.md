@@ -4,6 +4,41 @@ All notable changes to this gem. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the gem follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - not yet released
+
+### Added
+
+- An opt-in `search(words, before)` tool, requested by a GXB app: in a long tree the agent
+  could not find a message from its words, because zoom walks the tree one line at a time and
+  reaches its per-turn cap. Search returns message ids, the date as the `date` tool gives it,
+  and the label of the view line that covers each message; never text, kind or length. The
+  agent then reads a hit with `zoom(id, 1)`.
+  - Off by default: `Tools.for_turn(tree, turn)` still returns exactly `zoom`, `read` and
+    `date`. Turn it on with `search: true` in `Tools.for_turn`, `attach`, `Manager.new`,
+    `has_infinite_context` or `with_infinite_context`.
+  - `search_mask:`: a callable (text in, masked text out) applied before matching, so a value
+    the host screens can never match. It must replace flagged spans with spaces (a word such
+    as `[masked]` would be searchable itself). A mask that raises or returns a non-String
+    makes that message not match, and the count is logged. A host that screens text must
+    pass one.
+  - Matching in Ruby over this tree's own messages only, never in SQL (works with
+    `encrypt_text`; no index, no write, no model call). NFKC and case folding; whole words;
+    prefix only for words of 5 or more letters with letters only; a word with a digit or a
+    symbol matches a whole space-separated token only, apart from symbols at the token's ends
+    (`12345` matches in `#12345,` but never in `123456789`, `12345.678` or `id::12345`).
+  - Limits: 10 results, all-word matches first, then partial matches ("N of M words"),
+    newest first within each; `before:` pages back; 3 searches per turn (`search_cap:`); at
+    most 20,000 messages and 2 seconds per search, with a note of which ids were searched.
+  - The logger gets one line per call (a status and counts), no query words and no text.
+- `Turn#searches`, the number of searches in the turn (memory only), and
+  `Turn#claim_search!(cap)`, which takes one search under a lock.
+- `attach` and `with_infinite_context` take `logger:` and pass it to the Manager.
+
+### Changed
+
+- `Manager#turn` builds the instructions from `Tree#shown_view` (the same lines as before), so
+  the search tool can name the covering line of the view shown this turn.
+
 ## [0.2.3] - not yet released
 
 ### Fixed

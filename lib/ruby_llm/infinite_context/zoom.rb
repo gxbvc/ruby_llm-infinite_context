@@ -3,7 +3,8 @@
 module RubyLLM
   module InfiniteContext
     # Per-turn state for the zoom tools: the lines opened so far, the zoom
-    # count, and the turn's id (the `session` of a zoom event).
+    # count, the search count, and the turn's id (the `session` of a zoom
+    # event).
     class Turn
       attr_reader :id, :opened
 
@@ -12,6 +13,8 @@ module RubyLLM
         @cap = cap
         @opened = {}
         @zooms = 0
+        @searches = 0
+        @search_lock = Mutex.new
       end
 
       # True when the agent opened this label earlier in the turn.
@@ -26,6 +29,21 @@ module RubyLLM
       def remaining = @cap - @zooms
 
       attr_reader :zooms
+
+      # Searches run this turn (memory only, no write).
+      attr_reader :searches
+
+      # Takes one search of the turn's `cap` (Search's own cap, separate from
+      # the zoom cap). False when none is left. One step under a lock, so
+      # tool calls at the same time cannot pass the cap.
+      def claim_search!(cap)
+        @search_lock.synchronize do
+          return false if @searches >= cap
+
+          @searches += 1
+          true
+        end
+      end
     end
 
     # The agent's memory tools: zoom, read (paging through a long message)
@@ -91,7 +109,7 @@ module RubyLLM
         entry = @tree.entry(Integer(id))
         return "No message #{id}." unless entry
 
-        entry.created_at.strftime("%a %Y-%m-%d %H:%M %Z")
+        entry.created_at.strftime(DATE_FORMAT)
       rescue ArgumentError, TypeError
         "No message #{id}."
       end

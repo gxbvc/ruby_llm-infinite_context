@@ -52,6 +52,44 @@ module RubyLLM
         assert_equal 3, chat.tools.size # zoom, read, date
       end
 
+      def test_search_is_off_by_default_and_on_with_search_true
+        tree = Tree.for("manager-search", compactor: "test-model")
+        3.times { |i| tree.append(:user, "note #{i} about quartz") }
+        off = FakeChat.new
+        Manager.new(tree, pump: :none) { off }.turn("hello")
+        assert_equal [Tools::ZoomTool, Tools::ReadTool, Tools::DateTool], off.tools.map(&:class)
+
+        lines = []
+        on = FakeChat.new
+        manager = Manager.new(tree, pump: :none, logger: ->(l) { lines << l }, search: true,
+          search_mask: ->(t) { t.gsub("note 1", "[masked]") }, search_cap: 1) { on }
+        manager.turn("where is it")
+        assert manager.search?
+        assert_equal %w[zoom read date search], on.tools.map { |t| t.class.tool_name }
+        reply = on.tools.last.execute(words: "note quartz")
+        # The covering lines are the lines this turn's view shows (short
+        # entries are their own lines). The masked "note" of entry 1 does
+        # not count.
+        assert_match(/\AMessages with all words: 2 \([^)]*, in line 2\+1\), 0 \([^)]*, in line 0\+1\)\. /, reply)
+        assert_includes reply, "1 (1 of 2 words, "
+        assert_includes on.tools.last.execute(words: "quartz"), "Search cap reached"
+        assert_equal 1, lines.grep(/\Asearch: status=ok /).size
+        assert_equal 1, lines.grep(/\Asearch: status=cap /).size
+      end
+
+      def test_attach_passes_the_search_options_through
+        chat = FakeChat.new
+        mask = ->(t) { t }
+        manager = Manager.attach(chat, key: "manager-attach-search", pump: :none, search: true,
+          search_mask: mask, search_cap: 2)
+        assert manager.search?
+        assert_same mask, manager.search_mask
+        assert_equal 2, manager.search_cap
+        refute Manager.attach(chat, key: "manager-attach-plain", pump: :none).search?
+        assert_raises(ArgumentError) { Manager.attach(chat, key: "m", search: true, search_mask: "x") }
+        assert_raises(ArgumentError) { Manager.attach(chat, key: "m", search: true, search_cap: -1) }
+      end
+
       def test_zoom_tools_drive_the_real_tree
         tree = Tree.for("manager-tools", compactor: "test-model")
         4.times { |i| tree.append(:user, "message #{i}") }

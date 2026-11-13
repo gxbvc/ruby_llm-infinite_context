@@ -15,7 +15,9 @@ that could wait forever for a lost or stuck worker thread (see "Threads"). 0.2.2
 repeat guard: after opening a pair of messages, the agent could not open the first message
 of that pair in the same turn (and the reverse). Zoom counters now land on the line opened.
 0.2.3 fixes a view that could be larger than its budget (26% over in one app; see "How it
-works", Views) and adds two hooks to `Pump::Runner` (see "Threads").
+works", Views) and adds two hooks to `Pump::Runner` (see "Threads"). 0.3.0 adds an opt-in
+`search` tool that finds messages by their words and returns ids and dates, never text (see
+"Search").
 The gem has been tested
 end to end on three
 real models: DeepSeek V4.1 Flash (11 of 12 questions right, 33 zooms), Claude Haiku 4.5
@@ -141,6 +143,78 @@ memory between turns, so the turn does not grow with the thread. For Fireworks, 
 `conversation.protocol = :chat_completions` (the attributes `protocol`, `assume_model_exists`
 and `context` are not saved; set them after loading the record) and use
 `has_infinite_context compactor: "...", compactor_options: wire`.
+
+### Search (opt-in)
+
+The agent can find a message by its words with a fourth tool, `search(words, before)`. It is
+off by default. Turn it on per memory:
+
+```ruby
+memory = RubyLLM::InfiniteContext.attach(chat, key: "conv-1", tokens: 20_000,
+                                         search: true,
+                                         search_mask: ->(text) { MyScreen.mask(text) })
+
+# or, for a Rails model
+has_infinite_context compactor: "claude-haiku-4-5", search: true, search_mask: MyScreen.method(:mask)
+conversation.with_infinite_context(tokens: 20_000, search: false)   # per-memory override
+```
+
+If you call `Tools.for_turn` yourself, pass `search: true` (and `search_mask:`, `search_cap:`,
+and `view:` with the `[level, i]` parts of the view you showed, from `tree.shown_view(budget).parts`).
+Without `search: true` the tool set is exactly `zoom`, `read` and `date`, as before.
+
+What it returns: message ids, the date (as the `date` tool gives it) and the label of the view
+line that covers each message, for example
+`Messages with all words: 812 (Tue 2026-11-10 14:02 UTC, in line 768+64). Use zoom(id, 1) to read one.`
+It never returns message text, the kind of a message, or its length. The agent then reads a
+hit with `zoom(id, 1)`, so search adds no new way to read text.
+
+How it matches:
+
+- Text and words are compared NFKC-normalized and case-folded (`CAFÉ` matches `café`).
+- A word matches whole words. A word of 5 or more letters, with letters only, also matches as a
+  prefix (`deploy` matches `deployment`). A word with a digit or a symbol matches a whole token
+  only: it must be the whole space-separated token, apart from symbols at the token's ends.
+  So `12345` matches in `#12345,` but never in `123456789`, `12345.678`, `id:12345` or
+  `id::12345`, and `file.rb` never matches in `file.rb.old`. Symbols at the ends of a query
+  word are dropped. Words shorter than 2
+  characters are ignored; at most 8 words are used.
+- Order: messages with all the words first, then the best partial matches (marked `3 of 4
+  words`), newest first within each, at most 10. `before:` (a message id above 0) pages back
+  to older matches.
+
+The mask hook: `search_mask:` is a callable that gets each message's text and returns it with
+the spans your app must not reveal replaced **with spaces** (for example card numbers, keys,
+health identifiers). It runs before matching, so a masked value can never match, and the agent
+cannot learn that a message holds it by guessing the value. Use spaces (or remove the span),
+not a word such as `[masked]`: a replacement word is searchable itself and would show the agent
+which messages held a screened value. **If your app screens text before an agent may see it,
+pass a mask that applies the same screen.** Without one nothing is masked. If the mask raises,
+or returns something that is not a String, that message does not match (it fails closed) and
+the count goes to the log. The mask runs in the calling thread; the time limit is checked after
+each message, so keep the mask fast (a mask that never returns blocks the search).
+
+```ruby
+search_mask: ->(text) { text.gsub(/\b\d{12,19}\b/) { |m| " " * m.length } }
+```
+
+Limits and cost:
+
+- At most 3 searches per turn (`search_cap:`), separate from the zoom cap.
+- The scan runs in Ruby over this tree's own messages, newest first, in batches of 500, at most
+  20,000 messages and 2 seconds per search. When a limit stops it, the reply says which ids it
+  searched ("searched messages 20000 down to 4113 only") so the agent can go on with `before:`.
+- It never searches in SQL (no `LIKE`, no full-text index), so encrypted text works and no plain
+  text index is stored. It writes nothing, makes no model call and keeps nothing between calls.
+- The logger gets one line per call with a status and counts only (`search: status=ok words=3
+  scanned=1118 hits=2 partial=1 mask_errors=0 stopped=no ms=40`, or `search: status=cap ms=0`
+  for a refused call): no query words, no text. Only a search that runs counts toward the cap;
+  a call with no usable words or a bad `before:` does not.
+
+Groups: like `zoom`, search reaches every message in the tree. In a tree shared by a group, a
+member who joined late can find older talk. This is not new with search; if your app needs a
+different rule, your app owns it (for example one tree per member, or no search for that
+tree).
 
 ### Bulk import of an existing thread
 
@@ -314,6 +388,9 @@ call `Rails.application.eager_load!` at the start of the task, or set
   from; `zoom(id, 1)` shows the message, paged when long (`read(id, page)`). Opening a line
   the agent already opened this turn returns "you already opened this line; its text is
   above" instead of the text again, and a per-turn cap (12 by default) bounds runaway zooming.
+  Zoom reaches every message of the tree, and so does search (opt-in, see above): in a tree
+  shared by a group, a member who joined late can open or find older talk. The app owns that
+  rule.
 - **Counters, not rewrites**: nodes count `dig_count` and `last_dug_at`; zoom events record
   the leaf a dig reached, the steps it cost, and the turn. No parent rewrite, no fold boost:
   the shipped action on repeated digs is `:none` (do nothing) until data supports one.

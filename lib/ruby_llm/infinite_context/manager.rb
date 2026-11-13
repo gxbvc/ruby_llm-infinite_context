@@ -15,13 +15,23 @@ module RubyLLM
     #   mem.tree.view_lines(80_000)
     #   mem.tree.stats.hot_nodes(limit: 10)
     class Manager
-      attr_reader :tree, :budget
+      attr_reader :tree, :budget, :search_mask, :search_cap
+
+      def search? = @search
 
       # Budget: `budget:` is bytes; `tokens:` converts with the rough 4
       # bytes-per-token estimator. Bytes win when both are given.
-      def initialize(tree, budget: nil, tokens: nil, pump: :sync, logger: nil, compactor_options: nil, &chat_factory)
+      #
+      # Search (off by default): `search: true` hands the agent the search
+      # tool as well; `search_mask:` is the host's mask (see Search; a host
+      # that screens text must pass one); `search_cap:` the searches per turn.
+      def initialize(tree, budget: nil, tokens: nil, pump: :sync, logger: nil, compactor_options: nil,
+        search: false, search_mask: nil, search_cap: SEARCH_CAP_PER_TURN, &chat_factory)
         @tree = tree
         @budget = InfiniteContext.resolve_budget(budget:, tokens:)
+        @search = search ? true : false
+        @search_mask = Search.check_mask!(search_mask)
+        @search_cap = Search.check_cap!(search_cap)
         @pump = pump
         @logger = logger
         @compactor_options = compactor_options && ChatOptions.normalize(compactor_options)
@@ -41,14 +51,15 @@ module RubyLLM
       # both. A :job pump (ActiveJob) cannot carry per-instance options, so
       # set InfiniteContext.compactor_chat_options at boot for it.
       def self.attach(chat, key:, budget: nil, tokens: nil, compactor: nil, pump: :sync,
-        chat_options: nil, compactor_options: nil)
+        chat_options: nil, compactor_options: nil, logger: nil,
+        search: false, search_mask: nil, search_cap: SEARCH_CAP_PER_TURN)
         tree = Tree.for(key, compactor: compactor)
         factory = case chat
         when Proc then chat
         when ->(c) { c.respond_to?(:ask) } then -> { chat }
         else -> { ChatOptions.build(chat, chat_options) }
         end
-        new(tree, budget:, tokens:, pump:, compactor_options:, &factory)
+        new(tree, budget:, tokens:, pump:, logger:, compactor_options:, search:, search_mask:, search_cap:, &factory)
       end
 
       # One turn: log the user's message, ask with the view as instructions,
@@ -58,8 +69,10 @@ module RubyLLM
         chat = ChatOptions.check!(@chat_factory.call, "turn")
         tree.append(:user, text)
         turn = Turn.new
-        chat.with_instructions("#{Prompts::VIEW_GUIDE}\n\n#{render_view}")
-        chat.with_tools(*Tools.for_turn(tree, turn))
+        shown = tree.shown_view(budget, logger: @logger)
+        chat.with_instructions("#{Prompts::VIEW_GUIDE}\n\n#{InfiniteContext.render_view(shown.lines)}")
+        chat.with_tools(*Tools.for_turn(tree, turn, search: @search, search_mask: @search_mask,
+          search_cap: @search_cap, view: shown.parts, logger: @logger))
         reply = chat.ask(text)
         if reply.respond_to?(:content) && reply.content
           tree.append(:assistant, reply.content.to_s)
